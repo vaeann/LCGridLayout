@@ -518,15 +518,25 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     CGRect frame = CGRectMake(0, headerHeight, w, MAX(0, panelHeight-headerHeight-safe.bottom-footerHeight-footerGap-2));
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
-    // Floating switch: bottom right, same geometry as the upstream button.
-    self.returnButton.frame = CGRectMake(MAX(8, w-150), MAX(0, h-safe.bottom-54), 138, 44);
+    // Floating switch. edgesForExtendedLayout makes our view full-height, so
+    // h - safeArea.bottom still lands *inside* the tab bar; the button ended up
+    // 39 of its 44 points underneath it. Clamp to the real tab bar top instead.
+    CGFloat bottomLimit = h - safe.bottom;
+    CGRect tabFrame = CGRectZero;
+    UITabBar *tabBar = self.tabBarController.tabBar;
+    if (tabBar && !tabBar.hidden && tabBar.window) {
+        tabFrame = [tabBar convertRect:tabBar.bounds toView:self.view];
+        if (!CGRectIsEmpty(tabFrame)) bottomLimit = MIN(bottomLimit, CGRectGetMinY(tabFrame));
+    }
+    self.returnButton.frame = CGRectMake(MAX(8, w-150), MAX(0, bottomLimit-44-14), 138, 44);
     static BOOL loggedSwitchButton = NO;
     if (!loggedSwitchButton) {
         loggedSwitchButton = YES;
-        LGLog([NSString stringWithFormat:@"Switch button frame=%@ title=%@ inWindow=%d",
+        LGLog([NSString stringWithFormat:@"Switch button frame=%@ title=%@ inWindow=%d h=%.0f safe.b=%.0f tab=%@",
                NSStringFromCGRect(self.returnButton.frame),
                self.returnButton.configuration.title ?: @"(nil)",
-               self.returnButton.window != nil]);
+               self.returnButton.window != nil,
+               h, safe.bottom, NSStringFromCGRect(tabFrame)]);
     }
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }

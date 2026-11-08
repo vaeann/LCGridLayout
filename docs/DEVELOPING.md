@@ -33,6 +33,20 @@ Windows 上没有 Xcode，编译只能交给 CI：
 "loaded" 名字——不 bump 你就分不清设备上跑的是哪一版。Tweaks 里**只能保留一个**
 `LCGridLayout*`，多个副本会被同时加载。
 
+### 本机网络（会卡住 push）
+
+`github.com:443` 直连经常不通，但 `api.github.com` 通常正常。这台机器走局域网代理
+`192.168.8.122:6152`（HTTP），SOCKS5 在 `:6153`。git 默认不读系统代理设置，所以要显式给：
+
+```bash
+git -c http.proxy=http://192.168.8.122:6152 push origin main
+```
+
+代理端口变了就改这个值。`curl` 同理加 `--proxy http://192.168.8.122:6152`。
+
+彻底连不上时还有一条路：用 GitHub **Contents API** 单文件提交（需要 token 的
+`workflow` scope），拿 `contents/<path>` 的 `sha` 后 PUT base64 内容即可——绕开 git 传输。
+
 ---
 
 ## 2. 加载链路（按执行顺序）

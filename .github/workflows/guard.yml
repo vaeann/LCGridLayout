@@ -22,7 +22,9 @@ jobs:
       - name: LICENSE 保持 AGPL-3.0 原文
         run: |
           set -euo pipefail
-          EXPECTED="e0eedba615d5cd1b986afb6c5b3a4b1ae33713e7e9dc74d19daec5e3221f9d2e"
+          # 哈希按仓库内存储形态（LF）计算：`git show HEAD:LICENSE | sha256sum`。
+          # 换行符不同会得到完全不同的值，别用 Windows 工作区的 CRLF 文件去算。
+          EXPECTED="0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
           ACTUAL="$(sha256sum LICENSE | awk '{print $1}')"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::error::LICENSE 被改动了。AGPL-3.0 全文必须原样保留。"

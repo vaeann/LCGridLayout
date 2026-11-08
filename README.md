@@ -1,8 +1,13 @@
 # LCGridLayout
 
+> **本仓库是 [Kan9e/LCGridLayout](https://github.com/Kan9e/LCGridLayout) 的二次开发分支（fork）。**
+> 自 2026-11-08 起由 [@vaeann](https://github.com/vaeann) 维护，按 **AGPL-3.0** 分发。
+> 与上游的差异见 [docs/FORK.md](docs/FORK.md)；要改代码先看 [docs/DEVELOPING.md](docs/DEVELOPING.md)。
+> 下载用[本仓库的 Releases](https://github.com/vaeann/LCGridLayout/releases)，上游原版在[上游仓库](https://github.com/Kan9e/LCGridLayout/releases)。
+
 给 **LiveContainer 3.8.0 及以上**（含 3.8.2 / 3.8.11 等 nightly）的宿主侧 UI 插件：把“我的应用”列表换成桌面式图标网格。
 
-**下载**：[Releases](https://github.com/Kan9e/LCGridLayout/releases) · **许可**：[AGPL-3.0](LICENSE)
+**下载**：[Releases](https://github.com/vaeann/LCGridLayout/releases) · **许可**：[AGPL-3.0](LICENSE) · **构建**：本仓库改由 GitHub Actions 出包，见[构建](#构建)
 
 ## 功能
 
@@ -58,6 +63,10 @@
 - 未验证：iPad / 横屏、多任务并发、其他 iOS 版本、LiveContainer 3.8.0 之外的其他版本
 
 ## 构建
+
+> **本仓库的常规路径是 GitHub Actions**：Actions → **Build dylib** → Run workflow。
+> 产物在 artifact 里；勾选 `create_release` 会同时发 Release。Windows 上不需要装 Xcode。
+> 下面的本地脚本只在装有完整 Xcode 的 macOS 上可用。
 
 ```bash
 bash scripts/build.sh    # 产物 dist/LCGridLayout_v<N>.dylib，完整日志 logs/build.log

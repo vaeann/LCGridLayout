@@ -1,0 +1,82 @@
+name: Guard
+
+# 秒级静态守卫，比构建便宜得多，push 就先跑它。
+# 拦的是「不该进仓库的东西」和「AGPL 合规被破坏」，不是代码质量。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: 合规与安全基线
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: LICENSE 保持 AGPL-3.0 原文
+        run: |
+          set -euo pipefail
+          EXPECTED="e0eedba615d5cd1b986afb6c5b3a4b1ae33713e7e9dc74d19daec5e3221f9d2e"
+          ACTUAL="$(sha256sum LICENSE | awk '{print $1}')"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::LICENSE 被改动了。AGPL-3.0 全文必须原样保留。"
+            echo "期望: $EXPECTED"
+            echo "实际: $ACTUAL"
+            echo "如果想声明自己的版权，写进 README.md 或 NOTICE.md，不要动 LICENSE。"
+            exit 1
+          fi
+          echo "OK: LICENSE 与上游一致"
+
+      - name: 没有签名材料或凭证
+        run: |
+          set -euo pipefail
+          HITS="$(find . -type f \
+            \( -iname "*.p12" -o -iname "*.p8" -o -iname "*.pfx" \
+            -o -iname "*.mobileprovision" -o -iname "*.provisionprofile" \
+            -o -iname "*.cer" -o -iname "*.key" -o -iname "*.keystore" -o -iname "*.jks" \
+            -o -iname "*.ipa" -o -iname "*.dylib" -o -name ".env" \) \
+            -not -path "./.git/*" 2>/dev/null || true)"
+          if [ -n "$HITS" ]; then
+            echo "::error::仓库里出现了不应提交的文件："
+            echo "$HITS"
+            exit 1
+          fi
+          echo "OK: 无敏感文件、无二进制产物"
+
+      - name: 源码静态自检
+        run: python3 scripts/lint.py
+
+      - name: 衍生作品声明完整
+        run: |
+          set -euo pipefail
+          fail=0
+          grep -q "Kan9e/LCGridLayout" README.md || { echo "::error::README 缺少上游链接"; fail=1; }
+          grep -qi "AGPL" README.md            || { echo "::error::README 缺少 AGPL 声明"; fail=1; }
+          test -f NOTICE.md                    || { echo "::error::缺少 NOTICE.md"; fail=1; }
+          test -f docs/FORK.md                 || { echo "::error::缺少 docs/FORK.md（AGPL 5(a) 要求标注修改）"; fail=1; }
+          test -f .github/upstream-state.json  || { echo "::error::缺少 .github/upstream-state.json"; fail=1; }
+          exit $fail
+
+      - name: 关键文件仍在
+        run: |
+          set -euo pipefail
+          for f in Sources/LCGridLayout.m scripts/build.sh scripts/verify_macho.py VERSION docs/INSTALL.md docs/TESTING.md; do
+            test -f "$f" || { echo "::error::关键文件缺失: $f"; exit 1; }
+          done
+          echo "OK: 关键文件齐全"
+
+      - name: 行尾统一 LF
+        run: |
+          set -euo pipefail
+          if grep -rIl $'\r' --exclude-dir=.git . 2>/dev/null | head -5 | grep -q .; then
+            echo "::error::以下文件混入了 CRLF，请跑 scripts/setup.sh --fix-eol："
+            grep -rIl $'\r' --exclude-dir=.git . 2>/dev/null | head -10
+            exit 1
+          fi
+          echo "OK: 全部为 LF"

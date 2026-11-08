@@ -19,3 +19,7 @@ ShowMyTouches-*.zip
 .DS_Store
 
 showmytouches/
+
+# fork: 构建产物永不入库（Guard 会拦）
+*.dylib
+*.ipa

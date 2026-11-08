@@ -1,0 +1,131 @@
+name: Build dylib
+
+# 本仓库在 Windows 上开发，没有 Xcode。dylib 只能由这里的 macOS runner 产出。
+#
+# 触发方式：
+#   - push 到 main 且改了源码/脚本/VERSION：只构建 + 上传 artifact，不发 Release
+#   - 手动 Run workflow：构建 + 可选创建 Release（默认开）
+#
+# runner 固定用 macos-26-intel：macos-latest（arm64）在公开仓库排队 15 分钟后
+# 会被系统直接放弃（The job was not acquired by Runner of type hosted），
+# Intel 镜像实测 10 秒内分配。交叉编译 iOS arm64 与宿主架构无关，产物一致。
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "构建成功后创建 Release"
+        type: boolean
+        default: true
+      note:
+        description: "附加到 Release 说明末尾（可选）"
+        type: string
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "Sources/**"
+      - "scripts/**"
+      - "VERSION"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  # 同一分支只跑最新的构建，避免连续 push 堆一串排队任务。
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 构建 + 校验
+    runs-on: macos-26-intel
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 工具链自检
+        run: |
+          set -euo pipefail
+          echo "runner: $RUNNER_OS $(uname -m)"
+          # build.sh 默认读 /Applications/Xcode.app；这里显式指向 runner 的默认
+          # Xcode，避免镜像里 Xcode.app 路径与默认 toolchain 不一致时误判缺失。
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+          xcodebuild -version
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "iPhoneOS SDK: $SDK"
+          test -d "$SDK" || { echo "::error::iPhoneOS SDK 缺失"; exit 1; }
+
+      - name: 源码静态检查
+        run: python3 scripts/lint.py
+
+      - name: 读取版本
+        id: ver
+        run: |
+          set -euo pipefail
+          V="$(tr -d '[:space:]' < VERSION)"
+          [[ "$V" =~ ^[0-9]+$ ]] || { echo "::error::VERSION 必须是纯数字，实际是 '$V'"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "dylib=LCGridLayout_v${V}.dylib" >> "$GITHUB_OUTPUT"
+          echo "构建目标：LCGridLayout_v${V}.dylib"
+
+      - name: 构建 dylib
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build.sh
+          bash scripts/build.sh
+          ls -l dist/
+
+      - name: 复核产物
+        run: |
+          set -euo pipefail
+          F="dist/${{ steps.ver.outputs.dylib }}"
+          test -f "$F" || { echo "::error::未找到产物 $F"; exit 1; }
+          python3 scripts/verify_macho.py "$F"
+          shasum -a 256 "$F" | tee dist/SHA256SUMS.txt
+          echo "### 产物校验通过" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat dist/SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LCGridLayout_v${{ steps.ver.outputs.version }}_build${{ github.run_number }}
+          path: |
+            dist/${{ steps.ver.outputs.dylib }}
+            dist/SHA256SUMS.txt
+            logs/build.log
+          if-no-files-found: error
+
+      - name: 生成 Release 说明
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          RUN: ${{ github.run_number }}
+          NOTE: ${{ inputs.note }}
+        run: |
+          set -euo pipefail
+          python3 scripts/render_release_notes.py "$VERSION" "$COMMIT" "$RUN" "$NOTE" > /tmp/notes.md
+          cat /tmp/notes.md
+
+      - name: 创建 Release
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.ver.outputs.version }}-build${{ github.run_number }}"
+          F="dist/${{ steps.ver.outputs.dylib }}"
+          TITLE="LCGridLayout v${{ steps.ver.outputs.version }} (build ${{ github.run_number }})"
+          gh release create "$TAG" "$F" dist/SHA256SUMS.txt \
+            --title "$TITLE" \
+            --notes-file /tmp/notes.md \
+            --target "${{ github.sha }}"
+          echo "Release: $TAG" >> "$GITHUB_STEP_SUMMARY"

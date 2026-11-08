@@ -1,0 +1,26 @@
+# 行尾统一为 LF。
+#
+# 这个仓库在 Windows 上开发，而构建跑在 macOS。Windows 全局 core.autocrlf=true
+# 会在 checkout 时把 LF 转成 CRLF，导致 1000+ 行的单文件源码出现"整篇重写"的
+# diff，也会让 CI 里的 patch / 合并莫名其妙失败。这里对文本文件强制 LF。
+* text=auto eol=lf
+
+*.dylib binary
+*.ipa binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.zip binary
+
+# 本仓库自带（上游没有）的文件：同步上游时不要被覆盖。
+# 生效前提：本地执行一次 `git config merge.ours.driver true`，
+# 或直接跑 `bash scripts/setup.sh`。
+NOTICE.md merge=ours
+docs/FORK.md merge=ours
+docs/DEVELOPING.md merge=ours
+scripts/lint.py merge=ours
+scripts/setup.sh merge=ours
+.github/RELEASE_TEMPLATE.md merge=ours
+.github/workflows/build.yml merge=ours
+.github/workflows/check-upstream.yml merge=ours
+.github/workflows/guard.yml merge=ours

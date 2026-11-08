@@ -1,0 +1,77 @@
+name: Check upstream
+
+# 上游 Kan9e/LCGridLayout 更新很勤（v1 到 v24 只用了两天）。
+# 每天比对一次 commit，有更新就开 issue 提醒，避免二开代码越走越偏。
+#
+# 同步完成后更新 .github/upstream-state.json 的 synced_commit，issue 才会停。
+
+on:
+  schedule:
+    - cron: "17 2 * * *"   # 每天 02:17 UTC = 10:17 北京时间
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: 比对上游 commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 读取上游与本地同步点
+        id: state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA="$(gh api repos/Kan9e/LCGridLayout/commits/main --jq .sha)"
+          MSG="$(gh api repos/Kan9e/LCGridLayout/commits/main --jq '.commit.message' | head -1)"
+          DATE="$(gh api repos/Kan9e/LCGridLayout/commits/main --jq .commit.committer.date)"
+          if [[ -f .github/upstream-state.json ]]; then
+            SYNCED="$(python3 -c "import json;print(json.load(open('.github/upstream-state.json')).get('synced_commit',''))")"
+          else
+            SYNCED=""
+          fi
+          {
+            echo "sha=$SHA"
+            echo "msg=$MSG"
+            echo "date=$DATE"
+            echo "synced=$SYNCED"
+          } >> "$GITHUB_OUTPUT"
+          echo "上游 HEAD: $SHA"
+          echo "说明: $MSG"
+          echo "本地同步点: ${SYNCED:-<未记录>}"
+          if [[ "$SHA" == "$SYNCED" ]]; then
+            echo "need=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 是否已有未关闭的提醒
+        id: existing
+        if: steps.state.outputs.need == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          COUNT="$(gh issue list --state open --label upstream --json number --jq 'length')"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "未关闭的上游提醒 issue: $COUNT"
+
+      - name: 开 issue 提醒
+        if: steps.state.outputs.need == '1' && steps.existing.outputs.count == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.state.outputs.sha }}
+          MSG: ${{ steps.state.outputs.msg }}
+          DATE: ${{ steps.state.outputs.date }}
+          SYNCED: ${{ steps.state.outputs.synced }}
+        run: |
+          set -euo pipefail
+          python3 scripts/issue_body.py "$SHA" "$MSG" "$DATE" "$SYNCED" > /tmp/issue.md
+          gh label create upstream --description "上游有新提交" --color FBCA04 2>/dev/null || true
+          gh issue create --title "上游有更新：${MSG}" --label upstream --body-file /tmp/issue.md

@@ -416,11 +416,12 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.longPress.minimumPressDuration = 0.3;
     [self.panel addGestureRecognizer:self.longPress];
     self.returnButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    // Same styling as the upstream "back to grid" button: a filled capsule.
+    // (A secondarySystemBackground fill looked invisible against the grouped
+    // background it sits on — same grey, no contrast.)
     UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
     config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
     config.imagePadding = 8;
-    config.baseBackgroundColor = UIColor.secondarySystemBackgroundColor;
-    config.baseForegroundColor = UIColor.labelColor;
     self.returnButton.configuration = config;
     [self.returnButton addTarget:self action:@selector(toggleMode) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.returnButton];
@@ -517,9 +518,16 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     CGRect frame = CGRectMake(0, headerHeight, w, MAX(0, panelHeight-headerHeight-safe.bottom-footerHeight-footerGap-2));
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
-    // Floating switch: bottom right, clear of the tab bar.
-    CGFloat buttonWidth = 124, buttonHeight = 44;
-    self.returnButton.frame = CGRectMake(MAX(8, w-buttonWidth-16), MAX(0, h-safe.bottom-buttonHeight-14), buttonWidth, buttonHeight);
+    // Floating switch: bottom right, same geometry as the upstream button.
+    self.returnButton.frame = CGRectMake(MAX(8, w-150), MAX(0, h-safe.bottom-54), 138, 44);
+    static BOOL loggedSwitchButton = NO;
+    if (!loggedSwitchButton) {
+        loggedSwitchButton = YES;
+        LGLog([NSString stringWithFormat:@"Switch button frame=%@ title=%@ inWindow=%d",
+               NSStringFromCGRect(self.returnButton.frame),
+               self.returnButton.configuration.title ?: @"(nil)",
+               self.returnButton.window != nil]);
+    }
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }
 - (void)applyMode {

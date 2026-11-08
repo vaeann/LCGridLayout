@@ -754,11 +754,32 @@ static const void *LGSwitchButtonKey = &LGSwitchButtonKey;
     if (!item) {
         item = [[UIBarButtonItem alloc] initWithTitle:@"" style:UIBarButtonItemStylePlain target:self action:@selector(toggleMode)];
         objc_setAssociatedObject(host, LGSwitchButtonKey, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LGLog([NSString stringWithFormat:@"Toolbar probe: left=%lu right=%lu groups=%lu title=%@",
+               (unsigned long)host.navigationItem.leftBarButtonItems.count,
+               (unsigned long)host.navigationItem.rightBarButtonItems.count,
+               (unsigned long)host.navigationItem.trailingItemGroups.count,
+               host.navigationItem.title ?: @"(nil)"]);
     }
     item.target = self;   // the controller is rebuilt on every mount
     BOOL toNative = !self.nativeMode;
     item.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.2x2")];
     item.accessibilityLabel = toNative ? @"列表布局" : @"宫格布局";
+
+    // iOS 16+ SwiftUI toolbars are backed by item groups; setting
+    // rightBarButtonItems on such a bar is silently ignored. Try groups first
+    // and fall back to the legacy array only when there are none.
+    if (@available(iOS 16.0, *)) {
+        NSArray<UIBarButtonItemGroup *> *groups = host.navigationItem.trailingItemGroups;
+        if (groups.count > 0) {
+            for (UIBarButtonItemGroup *group in groups) {
+                if ([group.barButtonItems containsObject:item]) return;
+            }
+            UIBarButtonItemGroup *ours = [UIBarButtonItemGroup groupWithBarButtonItems:@[item] representativeItem:nil];
+            host.navigationItem.trailingItemGroups = [groups arrayByAddingObject:ours];
+            return;
+        }
+    }
+
     NSMutableArray<UIBarButtonItem *> *items = [host.navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
     if (![items containsObject:item]) {
         [items addObject:item];

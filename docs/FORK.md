@@ -29,6 +29,23 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## v27 — 网格独占全屏，双击改道，原生菜单居中（2026-11-08）
+
+实测反馈：网格模式下双击顶部空白会把 LiveContainer 的搜索界面叫出来，整页网格被盖住；
+同时双击切换本身没有生效。根因是网格模式下宿主导航栏仍显示，双击落在了它的地盘上。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | 新增 `lgSetNavigationBarHidden:` | 网格模式隐藏宿主导航栏（`setNavigationBarHidden:YES`），原生模式恢复；`applyMode`、`viewDidLayoutSubviews` 各调一次（后者是因为 `applyMode` 时视图还没进导航栈），`LGTick` 在页面失活时、`dealloc` 时兜底恢复 |
+| 同上 | `viewDidLayoutSubviews` | 导航栏隐藏时忽略宿主搜索框、且不再做 `compactTop` 的 `-44` 补偿（没有大标题就没有幻影留白），`top` 直接取 `safeAreaInsets.top` |
+| 同上 | `lgGestureAllowsTouch:` | 双击区域改成两段：网格 = 面板坐标 `y < 搜索框顶部`（即灵动岛下方那片）；原生 = `y > lgTopInset + 64`（搜索框以下的列表空白），彻底避开 LiveContainer 的导航栏 |
+| 同上 | 删除 `lgTopBlankLimitInView:` | 区域判断内联到上面，原方法不再需要 |
+| 同上 | 新增 `LGCardAlertController` | 居中卡片：半透明遮罩 + 300pt 圆角卡片 + 标题/说明/主按钮/取消，视觉与设置面板一致 |
+| 同上 | `showNativeSwitchMenu` | 从底部 action sheet 换成 `LGCardAlertController` |
+| `VERSION` | | 26 → 27 |
+
+网格模式下不再有任何原生导航栏元素，双击也不会再触发 LiveContainer 的搜索。
+
 ## v26 — 双击切换布局、设置面板改卡片（2026-11-08）
 
 需求：原生 ↔ 网格支持双击直接切换（带「是 / 否」确认，双击区域限定在搜索框上方的顶部空白，

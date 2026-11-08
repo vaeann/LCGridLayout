@@ -306,6 +306,15 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic, copy) void (^handler)(LGSheetAction action);
 @end
 
+// Small centred card, visually consistent with LGSheetController. Used where a
+// full settings sheet would be overkill (native mode only needs one action).
+@interface LGCardAlertController : UIViewController
+@property(nonatomic, copy) NSString *titleText;
+@property(nonatomic, copy) NSString *messageText;
+@property(nonatomic, copy) NSString *confirmTitle;
+@property(nonatomic, copy) void (^onConfirm)(void);
+@end
+
 @interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate, UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIView *panel;
 @property(nonatomic, strong) UIImageView *backgroundView;
@@ -348,8 +357,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgSyncLayout;
 - (void)refresh;
 - (void)lgEnsureHostPress;
+- (void)lgSetNavigationBarHidden:(BOOL)hidden;
 - (BOOL)lgGestureAllowsTouch:(UIGestureRecognizer *)gesture;
-- (CGFloat)lgTopBlankLimitInView:(UIView *)view;
 - (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)handleNavDoubleTap:(UITapGestureRecognizer *)gesture;
 - (void)confirmSwitchToNative:(BOOL)toNative;
@@ -483,17 +492,25 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    // SwiftUI may re-show the bar while rebuilding the page; keep the grid
+    // full-bleed. applyMode runs before the view is in a navigation stack, so
+    // this is also the first place the hide can actually take effect.
+    [self lgSetNavigationBarHidden:!self.nativeMode];
     // The overlay covers the whole host view (so nothing leaks through the
     // translucent tab bar); interactive content stays inside the safe area.
     UIEdgeInsets safe = self.view.safeAreaInsets;
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    CGRect nativeSearch = [self lgTopNativeSearchFrame];
+    BOOL navHidden = self.navigationController.isNavigationBarHidden;
+    // With the host bar hidden, LiveContainer's search field sits inside the
+    // content area we already cover; letting it influence geometry would hide
+    // our own search bar for no reason.
+    CGRect nativeSearch = navHidden ? CGRectZero : [self lgTopNativeSearchFrame];
     BOOL hasNativeTopSearch = !CGRectIsEmpty(nativeSearch);
     self.search.hidden = hasNativeTopSearch;
     CGFloat top = [self lgTopInset] + 2;
-    // Compact mode removes the phantom large-title inset, but only when there is
-    // no native search field to sit below.
-    if (!hasNativeTopSearch && [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top = MAX(0, top - 44);
+    // Compact mode removes the phantom large-title inset. With the bar hidden
+    // there is no large title, so the compensation must not apply.
+    if (!hasNativeTopSearch && !navHidden && [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top = MAX(0, top - 44);
     if (hasNativeTopSearch) top = MAX(top, CGRectGetMaxY(nativeSearch) + 4);
     self.lastTopInset = [self lgTopInset];
     self.lastSafeInsets = safe;
@@ -517,8 +534,18 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
     self.hostLongPress.enabled = self.nativeMode;
+    // Grid mode owns the whole screen: hiding the host bar removes both the
+    // large title and LiveContainer's search field, which otherwise swallows a
+    // double tap on the top strip and covers the grid with its search UI.
+    [self lgSetNavigationBarHidden:!self.nativeMode];
     [self lgEnsureHostPress];
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
+}
+
+- (void)lgSetNavigationBarHidden:(BOOL)hidden {
+    UINavigationController *nav = self.navigationController;
+    if (!nav || nav.isNavigationBarHidden == hidden) return;
+    [nav setNavigationBarHidden:hidden animated:NO];
 }
 - (void)showNative { [self.view endEditing:YES]; self.nativeMode = YES; [self applyMode]; }
 - (void)showGrid { self.nativeMode = NO; [self applyMode]; [self refresh]; }
@@ -747,25 +774,6 @@ static BOOL LGIsInteractive(UIView *view) {
     }
 }
 
-// Bottom edge of the "blank strip under the Dynamic Island": the top of the
-// search field when one is visible, otherwise the bottom of the navigation bar
-// (which already includes the expanded large title).
-- (CGFloat)lgTopBlankLimitInView:(UIView *)view {
-    CGFloat limit = CGFLOAT_MAX;
-    if (!self.panel.hidden && !self.search.hidden && self.search.window) {
-        limit = MIN(limit, CGRectGetMinY([self.search convertRect:self.search.bounds toView:view]));
-    }
-    CGRect native = [self lgTopNativeSearchFrame];   // in self.view's coordinate space
-    if (!CGRectIsEmpty(native)) {
-        limit = MIN(limit, CGRectGetMinY([self.view convertRect:native toView:view]));
-    }
-    if (limit == CGFLOAT_MAX) {
-        UINavigationBar *bar = self.navigationController.navigationBar;
-        if (bar) limit = CGRectGetMaxY([bar convertRect:bar.bounds toView:view]);
-    }
-    return limit;
-}
-
 // Anything that already handles taps must keep working, and the double tap is
 // only meant for the strip above the search field. Deciding this in
 // shouldReceiveTouch — not shouldBegin — is what keeps a single tap on an app
@@ -775,8 +783,18 @@ static BOOL LGIsInteractive(UIView *view) {
     if (!view) return NO;
     CGPoint point = [gesture locationInView:view];
     if (LGIsInteractive([view hitTest:point withEvent:nil])) return NO;
-    if (gesture == self.navDoubleTap) return point.y < [self lgTopBlankLimitInView:view];
-    return YES;
+    if (gesture != self.navDoubleTap) return YES;
+    if (self.nativeMode) {
+        // Native list: keep off the navigation bar. A double tap up there belongs
+        // to LiveContainer and opens its search UI, which covers everything.
+        // Only blank rows below the native search field count.
+        CGPoint inSelf = [gesture locationInView:self.view];
+        return inSelf.y > [self lgTopInset] + 64;
+    }
+    // Grid: the blank strip above our search field. With the host bar hidden
+    // that is the whole area under the Dynamic Island.
+    CGPoint inPanel = [gesture locationInView:self.panel];
+    return inPanel.y >= 0 && inPanel.y < CGRectGetMinY(self.search.frame);
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
@@ -824,14 +842,15 @@ static BOOL LGIsInteractive(UIView *view) {
 // the settings sheet would change something the user cannot see right now.
 - (void)showNativeSwitchMenu {
     if (self.presentedViewController) return;
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"切换到网格布局" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self showGrid];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = self.view;
-    sheet.popoverPresentationController.sourceRect = self.view.bounds;
-    [self presentViewController:sheet animated:YES completion:nil];
+    LGCardAlertController *card = [LGCardAlertController new];
+    card.titleText = @"切换布局";
+    card.messageText = @"当前显示的是原生列表";
+    card.confirmTitle = @"切换到网格布局";
+    card.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    card.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    __weak typeof(self) weakSelf = self;
+    card.onConfirm = ^{ [weakSelf showGrid]; };
+    [self presentViewController:card animated:YES completion:nil];
 }
 
 #pragma mark - Long-press actions (hide / uninstall / reorder)
@@ -1093,8 +1112,11 @@ static BOOL LGIsInteractive(UIView *view) {
 }
 - (void)dealloc {
     if (self.nativeSearchObserver) [NSNotificationCenter.defaultCenter removeObserver:self.nativeSearchObserver];
-    // The recognizer lives on the host's view, which outlives us.
+    // The recognizers live on the host's view, which outlives us.
     [self.hostLongPress.view removeGestureRecognizer:self.hostLongPress];
+    [self.navDoubleTap.view removeGestureRecognizer:self.navDoubleTap];
+    // Never leave the host without its navigation bar.
+    [self lgSetNavigationBarHidden:NO];
 }
 - (void)setHiddenUnlocked:(BOOL)unlocked {
     _hiddenUnlocked = unlocked;
@@ -1389,6 +1411,93 @@ static BOOL LGIsInteractive(UIView *view) {
 
 @end
 
+#pragma mark - Centred card implementation
+
+@implementation LGCardAlertController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(backgroundTapped:)];
+    [self.view addGestureRecognizer:tap];
+
+    UIView *card = [UIView new];
+    card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+    card.layer.cornerRadius = 20;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:card];
+
+    UILabel *title = [UILabel new];
+    title.text = self.titleText;
+    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle3];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.numberOfLines = 0;
+
+    UILabel *message = [UILabel new];
+    message.text = self.messageText;
+    message.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    message.textColor = UIColor.secondaryLabelColor;
+    message.textAlignment = NSTextAlignmentCenter;
+    message.numberOfLines = 0;
+
+    UIButton *confirm = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+    config.title = self.confirmTitle;
+    config.baseBackgroundColor = UIColor.labelColor;
+    config.baseForegroundColor = UIColor.systemBackgroundColor;
+    config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
+    confirm.configuration = config;
+    [confirm.heightAnchor constraintEqualToConstant:46].active = YES;
+    [confirm addTarget:self action:@selector(confirmTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    [cancel setTitle:@"取消" forState:UIControlStateNormal];
+    cancel.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    [cancel.heightAnchor constraintEqualToConstant:40].active = YES;
+    [cancel addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, message, confirm, cancel]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 12;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack setCustomSpacing:4 afterView:title];
+    [stack setCustomSpacing:20 afterView:message];
+    [stack setCustomSpacing:4 afterView:confirm];
+    [card addSubview:stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [card.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+        [card.widthAnchor constraintEqualToConstant:300],
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:24],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:20],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-20],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-16],
+    ]];
+}
+
+- (void)backgroundTapped:(UITapGestureRecognizer *)gesture {
+    // Only taps that land on the dimmed backdrop dismiss; the card itself is a
+    // subview and will hit-test to something else.
+    UIView *hit = [self.view hitTest:[gesture locationInView:self.view] withEvent:nil];
+    if (hit == self.view) [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)confirmTapped {
+    void (^callback)(void) = self.onConfirm;
+    [self dismissViewControllerAnimated:YES completion:^{
+        if (callback) callback();
+    }];
+}
+
+- (void)cancelTapped {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
 static const void *LGOverlayKey = &LGOverlayKey;
 static NSHashTable<LGGridController *> *LGOverlays;
 static NSString *LGTitle(void) {
@@ -1505,6 +1614,9 @@ static void LGTick(void) {
             }
             [grid lgSyncLayout];
         } else {
+            // Leaving the page (tab switch, pushed screen) must never leave the
+            // host without its navigation bar.
+            if (!grid.wasAway) [grid lgSetNavigationBarHidden:NO];
             grid.wasAway = YES;
         }
     }

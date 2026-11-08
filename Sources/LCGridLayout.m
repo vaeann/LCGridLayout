@@ -317,16 +317,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic, copy) void (^handler)(LGSheetAction action);
 @end
 
-// Small centred card, visually consistent with LGSheetController. Used where a
-// full settings sheet would be overkill (native mode only needs one action).
-@interface LGCardAlertController : UIViewController
-@property(nonatomic, copy) NSString *titleText;
-@property(nonatomic, copy) NSString *messageText;
-@property(nonatomic, copy) NSString *confirmTitle;
-@property(nonatomic, copy) void (^onConfirm)(void);
-@end
-
-@interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate, UIGestureRecognizerDelegate>
+@interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate>
 @property(nonatomic, strong) UIView *panel;
 @property(nonatomic, strong) UIImageView *backgroundView;
 @property(nonatomic, strong) UIView *dimView;
@@ -345,17 +336,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) NSInteger menuToken;
 @property(nonatomic, strong) UILabel *footer;
 @property(nonatomic, strong) UILongPressGestureRecognizer *longPress;
-// The footer counter is the settings entry: a fixed, always-visible target
-// beats "long press somewhere empty".
-@property(nonatomic, strong) UILongPressGestureRecognizer *footerPress;
-// Native list mode: the panel is hidden, so nothing of ours can receive touches.
-// This one rides on the host navigation controller's view instead.
-@property(nonatomic, strong) UILongPressGestureRecognizer *hostLongPress;
-// Double tap in the blank strip under the Dynamic Island — above the search
-// field — switches layout after a confirmation. One recognizer serves both
-// modes: it lives on the host navigation controller's view and picks the
-// direction from nativeMode.
-@property(nonatomic, strong) UITapGestureRecognizer *navDoubleTap;
 @property(nonatomic, strong) NSIndexPath *pressIndexPath;
 @property(nonatomic, strong) LGEntry *pressEntry;
 @property(nonatomic) CGPoint pressStart;
@@ -369,13 +349,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (CGFloat)lgTopInset;
 - (void)lgSyncLayout;
 - (void)refresh;
-- (void)lgEnsureHostPress;
 - (void)lgSuppressNativeSearch:(BOOL)suppress;
-- (BOOL)lgGestureAllowsTouch:(UIGestureRecognizer *)gesture;
-- (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture;
-- (void)handleNavDoubleTap:(UITapGestureRecognizer *)gesture;
-- (void)confirmSwitchToNative:(BOOL)toNative;
-- (void)showNativeSwitchMenu;
+- (void)lgInstallSwitchButton;
 - (void)handleSheetAction:(LGSheetAction)action;
 @end
 
@@ -436,17 +411,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self.panel addSubview:self.collection];
     self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
     self.longPress.minimumPressDuration = 0.3;
-    [self.collection addGestureRecognizer:self.longPress];
-    // Native mode hides the panel, so nothing of ours can receive touches there.
-    // This recognizer is attached to the host's navigation controller view
-    // instead, covering everything under the Dynamic Island.
-    self.hostLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleHostLongPress:)];
-    self.hostLongPress.minimumPressDuration = 0.5;
-    self.hostLongPress.delegate = self;
-    self.hostLongPress.enabled = NO;
-    self.navDoubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleNavDoubleTap:)];
-    self.navDoubleTap.numberOfTapsRequired = 2;
-    self.navDoubleTap.delegate = self;
+    [self.panel addGestureRecognizer:self.longPress];
     self.footer = [UILabel new];
     self.footer.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     self.footer.textColor = UIColor.secondaryLabelColor;
@@ -484,6 +449,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     // SwiftUI rebuilds the page (and its search bar) on tab switches; re-apply
     // the fade so the entry point never comes back while the grid is showing.
     if (!self.nativeMode) [self lgSuppressNativeSearch:YES];
+    // SwiftUI also reconciles navigationItem, which can drop our button.
+    [self lgInstallSwitchButton];
     CGFloat top = [self lgTopInset];
     UIEdgeInsets safe = self.view.safeAreaInsets;
     BOOL hasNativeSearch = !CGRectIsEmpty([self lgTopNativeSearchFrame]);
@@ -540,16 +507,14 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     CGRect frame = CGRectMake(0, headerHeight, w, MAX(0, panelHeight-headerHeight-safe.bottom-footerHeight-footerGap-2));
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
-    [self lgEnsureHostPress];
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
-    self.hostLongPress.enabled = self.nativeMode;
     // The host navigation bar (buttons and large title) stays visible on purpose:
     // the grid only replaces the search field and the app list below it.
     [self lgSuppressNativeSearch:!self.nativeMode];
-    [self lgEnsureHostPress];
+    [self lgInstallSwitchButton];
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
 
@@ -752,25 +717,14 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self presentViewController:share animated:YES completion:nil];
 }
 
-#pragma mark - Empty-space long press
+#pragma mark - Host bar button and search suppression
 
-// Anything that already handles its own taps (buttons, list rows) must keep
-// working; only genuinely blank areas should open our sheet. Walking up from
-// the hit view stops at the first list, so the list's own background still
-// counts as blank space.
-static BOOL LGIsInteractive(UIView *view) {
-    for (UIView *v = view; v; v = v.superview) {
-        if ([v isKindOfClass:UIControl.class]) return YES;
-        if ([v isKindOfClass:UICollectionViewCell.class] || [v isKindOfClass:UITableViewCell.class]) return YES;
-        if ([v isKindOfClass:UICollectionView.class] || [v isKindOfClass:UITableView.class]) return NO;
-    }
-    return NO;
-}
+static const void *LGSwitchButtonKey = &LGSwitchButtonKey;
 
 // LiveContainer's search bar lives in the navigation area. Even with the grid on
-// top, a double tap near the top can activate it and its search UI covers
-// everything. Fading it out (keeping the layout, unlike hidden) removes that
-// entry point; the original alpha is restored in native mode.
+// top, its expansion animation still runs and pushes the content around. Hiding
+// it (rather than fading) removes both the layout slot and the entry point; the
+// views are remembered weakly so native mode can bring them back.
 - (void)lgSuppressNativeSearch:(BOOL)suppress {
     if (suppress) {
         UIWindow *window = self.view.window;
@@ -778,110 +732,46 @@ static BOOL LGIsInteractive(UIView *view) {
         NSMutableArray<UIView *> *bars = [NSMutableArray array];
         LGCollectSearchBars(window.rootViewController.view, self.view, bars);
         for (UIView *bar in bars) {
-            if (bar.alpha < 0.01) continue;
+            if (bar.hidden) continue;
             [self.suppressedSearchViews addObject:bar];
-            bar.alpha = 0;
-            bar.userInteractionEnabled = NO;
+            bar.hidden = YES;
         }
     } else {
         for (UIView *bar in self.suppressedSearchViews.allObjects) {
-            bar.alpha = 1;
-            bar.userInteractionEnabled = YES;
+            bar.hidden = NO;
         }
         [self.suppressedSearchViews removeAllObjects];
     }
 }
 
-- (void)lgEnsureHostPress {
-    // Native mode hides our panel, so the only place left to receive gestures is
-    // the host navigation controller's view. Attaching them there also covers
-    // the navigation bar — the blank strip under the Dynamic Island.
-    UIView *navView = self.navigationController.view;
-    if (!navView) return;
-    for (UIGestureRecognizer *gesture in @[self.hostLongPress, self.navDoubleTap]) {
-        if (gesture.view == navView) continue;
-        [gesture.view removeGestureRecognizer:gesture];
-        [navView addGestureRecognizer:gesture];
+// The single entry point for switching layouts: one button on the real
+// navigation bar that shows the *target* mode. Living on the host bar means it
+// never competes with LiveContainer's own gestures.
+- (void)lgInstallSwitchButton {
+    UIViewController *host = self.parentViewController;
+    if (!host) return;
+    UIBarButtonItem *item = objc_getAssociatedObject(host, LGSwitchButtonKey);
+    if (!item) {
+        item = [[UIBarButtonItem alloc] initWithTitle:@"" style:UIBarButtonItemStylePlain target:self action:@selector(toggleMode)];
+        objc_setAssociatedObject(host, LGSwitchButtonKey, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    item.target = self;   // the controller is rebuilt on every mount
+    BOOL toNative = !self.nativeMode;
+    item.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.2x2")];
+    item.accessibilityLabel = toNative ? @"列表布局" : @"宫格布局";
+    NSMutableArray<UIBarButtonItem *> *items = [host.navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
+    if (![items containsObject:item]) {
+        [items addObject:item];
+        host.navigationItem.rightBarButtonItems = items;
     }
 }
 
-// Anything that already handles taps must keep working, and the double tap is
-// only meant for the strip above the search field. Deciding this in
-// shouldReceiveTouch — not shouldBegin — is what keeps a single tap on an app
-// icon from being delayed while UIKit waits for a possible second tap.
-- (BOOL)lgGestureAllowsTouch:(UIGestureRecognizer *)gesture {
-    UIView *view = gesture.view;
-    if (!view) return NO;
-    CGPoint point = [gesture locationInView:view];
-    if (LGIsInteractive([view hitTest:point withEvent:nil])) return NO;
-    if (gesture != self.navDoubleTap) return YES;
+- (void)toggleMode {
     if (self.nativeMode) {
-        // Native list: stay below the native search field. The navigation bar
-        // belongs to LiveContainer — a double tap up there opens its search.
-        CGPoint inSelf = [gesture locationInView:self.view];
-        return inSelf.y > [self lgTopInset] + 64;
+        [self showGrid];
+    } else {
+        [self showNative];
     }
-    // Grid: any blank spot inside the panel. The panel no longer covers the
-    // navigation bar, so a negative y here means the touch landed on the bar —
-    // leave that to LiveContainer.
-    CGPoint inPanel = [gesture locationInView:self.panel];
-    return inPanel.y >= 0 && inPanel.y <= self.panel.bounds.size.height;
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    if (gestureRecognizer == self.hostLongPress || gestureRecognizer == self.navDoubleTap) {
-        return [self lgGestureAllowsTouch:gestureRecognizer];
-    }
-    return YES;
-}
-
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    if (gestureRecognizer == self.hostLongPress || gestureRecognizer == self.navDoubleTap) {
-        return [self lgGestureAllowsTouch:gestureRecognizer];
-    }
-    return YES;
-}
-
-- (void)handleNavDoubleTap:(UITapGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateEnded) return;
-    [self confirmSwitchToNative:!self.nativeMode];
-}
-
-- (void)confirmSwitchToNative:(BOOL)toNative {
-    if (self.presentedViewController) return;
-    NSString *title = toNative ? @"确定切换到原生列表吗？" : @"确定切换到网格布局吗？";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"是" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        if (toNative) {
-            [self showNative];
-        } else {
-            [self showGrid];
-        }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"否" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [haptic impactOccurred];
-    [self showNativeSwitchMenu];
-}
-
-// Native mode has exactly one job: get back to the grid. Everything else in
-// the settings sheet would change something the user cannot see right now.
-- (void)showNativeSwitchMenu {
-    if (self.presentedViewController) return;
-    LGCardAlertController *card = [LGCardAlertController new];
-    card.titleText = @"切换布局";
-    card.messageText = @"当前显示的是原生列表";
-    card.confirmTitle = @"切换到网格布局";
-    card.modalPresentationStyle = UIModalPresentationOverFullScreen;
-    card.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
-    __weak typeof(self) weakSelf = self;
-    card.onConfirm = ^{ [weakSelf showGrid]; };
-    [self presentViewController:card animated:YES completion:nil];
 }
 
 #pragma mark - Long-press actions (hide / uninstall / reorder)
@@ -1143,9 +1033,6 @@ static BOOL LGIsInteractive(UIView *view) {
 }
 - (void)dealloc {
     if (self.nativeSearchObserver) [NSNotificationCenter.defaultCenter removeObserver:self.nativeSearchObserver];
-    // The recognizers live on the host's view, which outlives us.
-    [self.hostLongPress.view removeGestureRecognizer:self.hostLongPress];
-    [self.navDoubleTap.view removeGestureRecognizer:self.navDoubleTap];
 }
 - (void)setHiddenUnlocked:(BOOL)unlocked {
     _hiddenUnlocked = unlocked;
@@ -1439,253 +1326,3 @@ static BOOL LGIsInteractive(UIView *view) {
 - (void)switchTapped { [self fire:LGSheetActionSwitchMode dismiss:YES]; }
 
 @end
-
-#pragma mark - Centred card implementation
-
-@implementation LGCardAlertController
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(backgroundTapped:)];
-    [self.view addGestureRecognizer:tap];
-
-    UIView *card = [UIView new];
-    card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    card.layer.cornerRadius = 20;
-    card.layer.cornerCurve = kCACornerCurveContinuous;
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:card];
-
-    UILabel *title = [UILabel new];
-    title.text = self.titleText;
-    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle3];
-    title.textAlignment = NSTextAlignmentCenter;
-    title.numberOfLines = 0;
-
-    UILabel *message = [UILabel new];
-    message.text = self.messageText;
-    message.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-    message.textColor = UIColor.secondaryLabelColor;
-    message.textAlignment = NSTextAlignmentCenter;
-    message.numberOfLines = 0;
-
-    UIButton *confirm = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-    config.title = self.confirmTitle;
-    config.baseBackgroundColor = UIColor.labelColor;
-    config.baseForegroundColor = UIColor.systemBackgroundColor;
-    config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
-    confirm.configuration = config;
-    [confirm.heightAnchor constraintEqualToConstant:46].active = YES;
-    [confirm addTarget:self action:@selector(confirmTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
-    [cancel setTitle:@"取消" forState:UIControlStateNormal];
-    cancel.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    [cancel.heightAnchor constraintEqualToConstant:40].active = YES;
-    [cancel addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, message, confirm, cancel]];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 12;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [stack setCustomSpacing:4 afterView:title];
-    [stack setCustomSpacing:20 afterView:message];
-    [stack setCustomSpacing:4 afterView:confirm];
-    [card addSubview:stack];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [card.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [card.widthAnchor constraintEqualToConstant:300],
-        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:24],
-        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-20],
-        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-16],
-    ]];
-}
-
-- (void)backgroundTapped:(UITapGestureRecognizer *)gesture {
-    // Only taps that land on the dimmed backdrop dismiss; the card itself is a
-    // subview and will hit-test to something else.
-    UIView *hit = [self.view hitTest:[gesture locationInView:self.view] withEvent:nil];
-    if (hit == self.view) [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)confirmTapped {
-    void (^callback)(void) = self.onConfirm;
-    [self dismissViewControllerAnimated:YES completion:^{
-        if (callback) callback();
-    }];
-}
-
-- (void)cancelTapped {
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-@end
-
-static const void *LGOverlayKey = &LGOverlayKey;
-static NSHashTable<LGGridController *> *LGOverlays;
-static NSString *LGTitle(void) {
-    NSBundle *bundle = LGGet(NSUserDefaults.class, @"lcMainBundle");
-    return [bundle localizedStringForKey:@"lc.appList.myApps" value:@"My Apps" table:nil];
-}
-static UIViewController *LGFindList(UIViewController *vc) {
-    if (!vc || !vc.isViewLoaded || !vc.view.window || vc.view.hidden) return nil;
-    if ([vc isKindOfClass:LGGridController.class]) return nil;
-    if ([vc isKindOfClass:UITabBarController.class]) return LGFindList(((UITabBarController *)vc).selectedViewController);
-    if ([vc isKindOfClass:UINavigationController.class]) {
-        UINavigationController *nav = (id)vc;
-        UIViewController *top = nav.topViewController;
-        // Do not cover pushed management screens or unknown SwiftUI hierarchies.
-        NSString *title = top.navigationItem.title ?: nav.navigationBar.topItem.title;
-        NSString *hostingClass = NSStringFromClass(top.class);
-        BOOL isHosting = [hostingClass containsString:@"HostingController"];
-        BOOL titleMatches = [title isEqualToString:LGTitle()] || title.length == 0;
-        if (nav.viewControllers.count == 1 && isHosting && titleMatches) return top;
-        return nil;
-    }
-    for (UIViewController *child in vc.childViewControllers) {
-        UIViewController *found = LGFindList(child);
-        if (found) return found;
-    }
-    return nil;
-}
-
-static void LGDumpController(UIViewController *vc, NSUInteger depth, NSMutableString *out) {
-    if (!vc || depth > 6 || out.length > 1600) return;
-    NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
-    NSString *title = vc.navigationItem.title ?: vc.title;
-    [out appendFormat:@"%@%@%@%@\n", indent, NSStringFromClass(vc.class),
-        vc.isViewLoaded ? (vc.view.window ? @" [on-screen]" : @" [loaded]") : @" [no-view]",
-        title.length ? [NSString stringWithFormat:@" \"%@\"", title] : @""];
-    for (UIViewController *child in vc.childViewControllers) LGDumpController(child, depth + 1, out);
-}
-static void LGDumpWindows(void) {
-    NSMutableString *out = [NSMutableString string];
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            if (window.hidden || window.alpha == 0) continue;
-            [out appendFormat:@"window level=%.1f root=%@\n", window.windowLevel, NSStringFromClass(window.rootViewController.class)];
-            LGDumpController(window.rootViewController, 1, out);
-        }
-    }
-    // Classes/titles only: no app names, bundle ids or container paths.
-    LGLog([NSString stringWithFormat:@"No host matched after 6s; view hierarchy:\n%@", out]);
-}
-
-static void LGTick(void) {
-    // Inactive is normal during the launch animation; only skip when backgrounded.
-    if (UIApplication.sharedApplication.applicationState == UIApplicationStateBackground) return;
-    static BOOL loggedFirstTick = NO;
-    if (!loggedFirstTick) {
-        loggedFirstTick = YES;
-        LGLog([NSString stringWithFormat:@"First tick after %.0f ms (appState=%ld)",
-               (CFAbsoluteTimeGetCurrent() - LGStartTime) * 1000.0,
-               (long)UIApplication.sharedApplication.applicationState]);
-    }
-    NSHashTable *active = [NSHashTable weakObjectsHashTable];
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState == UISceneActivationStateUnattached || scene.activationState == UISceneActivationStateBackground) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            if (window.hidden || window.alpha == 0 || window.windowLevel != UIWindowLevelNormal) continue;
-            UIViewController *host = LGFindList(window.rootViewController);
-            if (!host) continue;
-            LGGridController *grid = objc_getAssociatedObject(host, LGOverlayKey);
-            if (grid && grid.view.superview != host.view) {
-                // SwiftUI rebuilt the page view under us; drop the stale overlay so
-                // it is mounted fresh below instead of silently doing nothing.
-                objc_setAssociatedObject(host, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                grid = nil;
-            }
-            if (grid) {
-                // SwiftUI re-inserts its own content when a tab comes back; without
-                // this the native list paints above our overlay until the next tick.
-                if (host.view.subviews.lastObject != grid.view) [host.view bringSubviewToFront:grid.view];
-                [active addObject:grid];
-                continue;
-            }
-            grid = [LGGridController new];
-            [host addChildViewController:grid];
-            grid.view.translatesAutoresizingMaskIntoConstraints = NO;
-            [host.view addSubview:grid.view];
-            // Cover the host view edge to edge: the native list may extend under
-            // the translucent tab bar, and leaving that strip uncovered leaks the
-            // unmodified rows through the glass. Content is inset by safeAreaInsets
-            // inside LGGridController instead.
-            [NSLayoutConstraint activateConstraints:@[
-                [grid.view.leadingAnchor constraintEqualToAnchor:host.view.leadingAnchor],
-                [grid.view.trailingAnchor constraintEqualToAnchor:host.view.trailingAnchor],
-                [grid.view.topAnchor constraintEqualToAnchor:host.view.topAnchor],
-                [grid.view.bottomAnchor constraintEqualToAnchor:host.view.bottomAnchor]
-            ]];
-            [grid didMoveToParentViewController:host];
-            objc_setAssociatedObject(host, LGOverlayKey, grid, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [LGOverlays addObject:grid];
-            [active addObject:grid];
-            LGLog([NSString stringWithFormat:@"Mounted on native app-list hosting controller after %.0f ms (safe.top=%.1f navBottom=%.1f)",
-                   (CFAbsoluteTimeGetCurrent() - LGStartTime) * 1000.0,
-                   host.view.safeAreaInsets.top, [grid lgTopInset]]);
-        }
-    }
-    for (LGGridController *grid in LGOverlays) {
-        // Never hide the overlay while the host page is off-screen (tab switch,
-        // pushed sheet): the view is simply not visible then, and hiding it makes
-        // the native list flash for up to one tick when the user comes back.
-        if ([active containsObject:grid]) {
-            if (grid.wasAway) {
-                grid.wasAway = NO;
-                [grid refresh];
-            }
-            [grid lgSyncLayout];
-        } else {
-            grid.wasAway = YES;
-        }
-    }
-    static CFTimeInterval idleSince = 0;
-    static BOOL dumpedHierarchy = NO;
-    if (LGOverlays.count == 0) {
-        if (idleSince == 0) idleSince = CFAbsoluteTimeGetCurrent();
-        if (!dumpedHierarchy && CFAbsoluteTimeGetCurrent() - idleSince > 6) {
-            dumpedHierarchy = YES;
-            LGDumpWindows();
-        }
-    } else {
-        idleSince = 0;
-    }
-}
-
-__attribute__((constructor)) static void LGInitialize(void) {
-    @autoreleasepool {
-        if (!LGHost()) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            LGOverlays = [NSHashTable weakObjectsHashTable];
-            LGStartTime = CFAbsoluteTimeGetCurrent();
-            [NSUserDefaults.standardUserDefaults registerDefaults:@{LGColumns:@4, LGNames:@YES, LGNative:@NO, LGCompactTop:@YES}];
-            LGLog([NSString stringWithFormat:@"Host gate passed: LiveContainer %@ (>= 3.8.0); %@ loaded; no method hooks installed", LGDetectedVersion ?: @"?", LGLoadedName()]);
-            // Public UI containment and a low-frequency foreground discovery timer.
-            // No swizzling, substrate hooks, key window replacement or gesture hooks.
-            // 0.15s discovery: a 1s poll is what made returning to the App tab show
-            // the native list for about a second before the grid reappeared.
-            NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) { LGTick(); }];
-            timer.tolerance = 0.03;
-            // Startup burst: poll at 30ms for the first 1.2s so the overlay lands on
-            // the host page within one frame instead of one 100ms tick. It stops as
-            // soon as the burst window ends; the steady 0.1s timer takes over.
-            LGTick();
-            [NSTimer scheduledTimerWithTimeInterval:0.03 repeats:YES block:^(NSTimer *burstTimer) {
-                LGTick();
-                if (CFAbsoluteTimeGetCurrent() - LGStartTime > 1.2) [burstTimer invalidate];
-            }];
-            [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-                LGTick();
-                // Pick up apps installed/removed while the host was in background.
-                for (LGGridController *grid in LGOverlays) [grid refresh];
-            }];
-        });
-    }
-}

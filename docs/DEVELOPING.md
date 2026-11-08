@@ -110,11 +110,9 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 排序 | `saveOrder` / `moveItemAtIndexPath` | 存 folder 名数组；宿主已选 custom 时同步镜像 |
 | 解锁 | `footerTapped` / `setHiddenUnlocked` | 三击 → `LAContext` 认证 |
 | 设置 | `showSettings` + `LGSheetController` | 卡片式 sheet（medium/large detent）：分段控件管列数与间距，开关管名称，按钮管背景与日志 |
-| 双击切换 | `navDoubleTap` / `handleNavDoubleTap` / `confirmSwitchToNative` | 网格：搜索框以上的空白；原生：搜索框以下的列表空白。先弹确认框再切 |
-| 覆盖范围 | — | 网格只覆盖 `host.view`（= 搜索栏 + app 列表）。导航栏在 `nav.view` 上，天然不被覆盖，这是 v28 明确保留的行为 |
-| 居中卡片 | `LGCardAlertController` | 原生模式的「切换到网格布局」用它，视觉与 `LGSheetController` 一致 |
-| 原生长按 | `handleHostLongPress` / `lgEnsureHostPress` / `LGIsInteractive` | 导航栏与列表空白处唤出“切换到网格布局”；面板在原生模式是隐藏的，所以手势借挂宿主 `nav.view` |
-| 顶部边界 | `lgTopBlankLimitInView` | 算“顶部空白”的下边界：搜索框顶部，没有搜索框则用导航栏底部 |
+| 布局切换 | `lgInstallSwitchButton` / `toggleMode` | 导航栏右侧一个按钮，图标反映*目标*模式；`lgSyncLayout` 每 tick 补挂，防止 SwiftUI 重建 `navigationItem` 时丢掉 |
+| 搜索压制 | `lgSuppressNativeSearch:` | 网格模式把 LC 的 search bar 设为 `hidden`（不是 alpha），连展开动画和占位一起消掉 |
+| 覆盖范围 | — | 网格只覆盖 `host.view`（= 搜索栏 + app 列表）。导航栏在 `nav.view` 上，天然不被覆盖 |
 | 背景 | `chooseBackground` / `applyBackground` / `removeBackground` | PHPicker，最长边压到 2200px 存 JPEG |
 
 ---

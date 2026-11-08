@@ -29,6 +29,24 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## v30 — 手势全部移除，改为导航栏按钮（2026-11-08）
+
+用户决定：不再用手势切布局。原生 ↔ 网格统一由导航栏右侧一个按钮负责；只保留
+「网格长按空白开设置」，双击、原生长按全部删除。
+
+起因是三个实测问题：双击工具栏空白仍会让 LC 的搜索展开（内容被推挤，即使搜索框已不可见）；
+网格内长按只有列表下方的空白有效，导航栏那一行完全没反应。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | 删除 | `navDoubleTap`、`hostLongPress`、`lgEnsureHostPress`、`lgGestureAllowsTouch`、两个 delegate 方法、`handleNavDoubleTap`、`confirmSwitchToNative`、`handleHostLongPress`、`showNativeSwitchMenu`、`LGIsInteractive`、`LGCardAlertController`（接口+实现）、`UIGestureRecognizerDelegate` 遵循、以及 `footerPress` 这个只有声明没有实现的死属性 |
+| 同上 | 新增 `lgInstallSwitchButton` / `toggleMode` | 导航栏右侧一个按钮，图标显示**目标**模式（网格时 `list.bullet`、原生时 `square.grid.2x2`）；`item.target` 每次重挂，`lgSyncLayout` 每 tick 补挂 |
+| 同上 | `lgSuppressNativeSearch:` | 从 `alpha = 0` 改为 `hidden = YES`。前者虽然看不见，展开动画和占位还在，双击顶部仍会把内容推下去 |
+| 同上 | `loadView` | 长按手势挂回 `panel`（此前挂在 `collection`，所以只有列表内部空白有效） |
+| `VERSION` | | 29 → 30 |
+
+净减约 400 行（1692 → 1328）。
+
 ## v29 — 面板从导航栏下沿开始，原生搜索栏压暗（2026-11-08）
 
 实测 v28：网格模式下「App」大标题消失，双击空白仍会叫出 LiveContainer 的搜索。

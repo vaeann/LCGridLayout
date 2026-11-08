@@ -281,14 +281,12 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 }
 @end
 
-@interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate>
+@interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate, UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIView *panel;
 @property(nonatomic, strong) UIImageView *backgroundView;
 @property(nonatomic, strong) UIView *dimView;
 @property(nonatomic, strong) UICollectionView *collection;
 @property(nonatomic, strong) UISearchBar *search;
-@property(nonatomic, strong) UIStackView *bar;
-@property(nonatomic, strong) UIButton *returnButton;
 @property(nonatomic, strong) UILabel *empty;
 @property(nonatomic, strong) NSArray<LGEntry *> *entries;
 @property(nonatomic, strong) NSArray<LGEntry *> *filtered;
@@ -302,6 +300,9 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 @property(nonatomic) NSInteger menuToken;
 @property(nonatomic, strong) UILabel *footer;
 @property(nonatomic, strong) UILongPressGestureRecognizer *longPress;
+// Native list mode: the panel is hidden, so nothing of ours can receive touches.
+// This one rides on the host navigation controller's view instead.
+@property(nonatomic, strong) UILongPressGestureRecognizer *hostLongPress;
 @property(nonatomic, strong) NSIndexPath *pressIndexPath;
 @property(nonatomic, strong) LGEntry *pressEntry;
 @property(nonatomic) CGPoint pressStart;
@@ -340,17 +341,9 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     self.dimView.userInteractionEnabled = NO;
     self.dimView.hidden = YES;
     [self.panel addSubview:self.dimView];
-    UIButton *manage = [UIButton buttonWithType:UIButtonTypeSystem];
-    [manage setImage:[UIImage systemImageNamed:@"arrow.uturn.backward"] forState:UIControlStateNormal];
-    [manage setTitle:@" 恢复原生" forState:UIControlStateNormal];
-    [manage addTarget:self action:@selector(showNative) forControlEvents:UIControlEventTouchUpInside];
-    UIButton *settings = [UIButton buttonWithType:UIButtonTypeSystem];
-    [settings setImage:[UIImage systemImageNamed:@"slider.horizontal.3"] forState:UIControlStateNormal];
-    [settings setTitle:@" 网格设置" forState:UIControlStateNormal];
-    [settings addTarget:self action:@selector(showSettings) forControlEvents:UIControlEventTouchUpInside];
-    self.bar = [[UIStackView alloc] initWithArrangedSubviews:@[manage, [UIView new], settings]];
-    self.bar.spacing = 8;
-    [self.panel addSubview:self.bar];
+    // The top toolbar (back-to-native / grid settings) is intentionally gone:
+    // both entries now live behind a long press on empty space, so the grid
+    // starts right below the navigation bar.
     self.search = [UISearchBar new];
     self.search.searchBarStyle = UISearchBarStyleMinimal;
     self.search.placeholder = @"搜索应用";
@@ -377,18 +370,19 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     self.empty.textAlignment = NSTextAlignmentCenter;
     self.collection.backgroundView = self.empty;
     [self.panel addSubview:self.collection];
-    self.returnButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-    config.title = @"返回网格";
-    config.image = [UIImage systemImageNamed:@"square.grid.3x3.fill"];
-    config.imagePadding = 8;
-    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-    self.returnButton.configuration = config;
-    [self.returnButton addTarget:self action:@selector(showGrid) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.returnButton];
+    // Long press rides on the panel rather than the collection: empty space
+    // outside the grid (below the last row, around the footer) should open the
+    // settings sheet too. A hit on a cell still takes the drag / menu path.
     self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
     self.longPress.minimumPressDuration = 0.3;
-    [self.collection addGestureRecognizer:self.longPress];
+    [self.panel addGestureRecognizer:self.longPress];
+    // Native mode hides the panel, so nothing of ours can receive touches there.
+    // This recognizer is attached to the host's navigation controller view
+    // instead, covering everything under the Dynamic Island.
+    self.hostLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleHostLongPress:)];
+    self.hostLongPress.minimumPressDuration = 0.5;
+    self.hostLongPress.delegate = self;
+    self.hostLongPress.enabled = NO;
     self.footer = [UILabel new];
     self.footer.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     self.footer.textColor = UIColor.secondaryLabelColor;
@@ -466,21 +460,23 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     self.panel.frame = self.view.bounds;
     self.backgroundView.frame = self.panel.bounds;
     self.dimView.frame = self.panel.bounds;
-    self.bar.frame = CGRectMake(16, top, MAX(0,w-32), 40);
-    self.search.frame = CGRectMake(4, top+40, MAX(0,w-8), 48);
+    self.search.frame = CGRectMake(4, top, MAX(0,w-8), 48);
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
     self.footer.frame = CGRectMake(0, MAX(0, h-safe.bottom-footerHeight-footerGap), w, footerHeight);
-    CGFloat headerHeight = 40 + (hasNativeTopSearch ? 8 : 48);
+    // No toolbar row above the search field any more; the header is just the
+    // search bar (or a small gap when LiveContainer's own search field is used).
+    CGFloat headerHeight = hasNativeTopSearch ? 8 : 48;
     CGRect frame = CGRectMake(0, top+headerHeight, w, MAX(0, h-top-headerHeight-safe.bottom-footerHeight-footerGap-2));
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
-    self.returnButton.frame = CGRectMake(MAX(8,w-150), MAX(0,h-safe.bottom-54), 138, 44);
+    [self lgEnsureHostPress];
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
-    self.returnButton.hidden = !self.nativeMode;
+    self.hostLongPress.enabled = self.nativeMode;
+    [self lgEnsureHostPress];
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
 - (void)showNative { [self.view endEditing:YES]; self.nativeMode = YES; [self applyMode]; }
@@ -677,9 +673,66 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
         return;
     }
     UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
-    share.popoverPresentationController.sourceView = self.bar;
-    share.popoverPresentationController.sourceRect = self.bar.bounds;
+    share.popoverPresentationController.sourceView = self.view;
+    share.popoverPresentationController.sourceRect = self.view.bounds;
     [self presentViewController:share animated:YES completion:nil];
+}
+
+#pragma mark - Empty-space long press
+
+// Anything that already handles its own taps (buttons, list rows) must keep
+// working; only genuinely blank areas should open our sheet. Walking up from
+// the hit view stops at the first list, so the list's own background still
+// counts as blank space.
+static BOOL LGIsInteractive(UIView *view) {
+    for (UIView *v = view; v; v = v.superview) {
+        if ([v isKindOfClass:UIControl.class]) return YES;
+        if ([v isKindOfClass:UICollectionViewCell.class] || [v isKindOfClass:UITableViewCell.class]) return YES;
+        if ([v isKindOfClass:UICollectionView.class] || [v isKindOfClass:UITableView.class]) return NO;
+    }
+    return NO;
+}
+
+- (void)lgEnsureHostPress {
+    // Native mode hides our panel, so the only place left to receive a long
+    // press is the host navigation controller's view. Attaching it there also
+    // covers the navigation bar — the biggest blank area under the Dynamic
+    // Island — instead of a narrow strip of list background.
+    UIView *navView = self.navigationController.view;
+    if (!navView) return;
+    if (self.hostLongPress.view == navView) return;
+    [self.hostLongPress.view removeGestureRecognizer:self.hostLongPress];
+    [navView addGestureRecognizer:self.hostLongPress];
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer != self.hostLongPress) return YES;
+    UIView *navView = self.navigationController.view;
+    if (!navView) return NO;
+    CGPoint point = [gestureRecognizer locationInView:navView];
+    UIView *hit = [navView hitTest:point withEvent:nil];
+    return !LGIsInteractive(hit);
+}
+
+- (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    [self showNativeSwitchMenu];
+}
+
+// Native mode has exactly one job: get back to the grid. Everything else in
+// the settings sheet would change something the user cannot see right now.
+- (void)showNativeSwitchMenu {
+    if (self.presentedViewController) return;
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"切换到网格布局" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self showGrid];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = self.view.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - Long-press actions (hide / uninstall / reorder)
@@ -689,37 +742,47 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan: {
             NSIndexPath *indexPath = [self.collection indexPathForItemAtPoint:point];
-            if (!indexPath || indexPath.item >= (NSInteger)self.filtered.count) return;
-            self.pressIndexPath = indexPath;
-            self.pressEntry = self.filtered[indexPath.item];
+            BOOL onCell = indexPath && indexPath.item < (NSInteger)self.filtered.count;
+            // Empty space opens the settings sheet; a real cell keeps the
+            // existing drag-reorder / hide / uninstall behaviour.
+            self.pressIndexPath = onCell ? indexPath : nil;
+            self.pressEntry = onCell ? self.filtered[indexPath.item] : nil;
             self.pressStart = point;
             self.moved = NO;
             self.menuShown = NO;
             self.draggingCell = NO;
-            UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-            [haptic impactOccurred];
+            if (onCell) {
+                UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+                [haptic impactOccurred];
+            }
             // Keep holding still: the menu shows without waiting for the finger to lift.
             NSInteger token = ++self.menuToken;
             __weak typeof(self) weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (!weakSelf || weakSelf.menuToken != token || weakSelf.moved || weakSelf.menuShown || !weakSelf.pressEntry) return;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((onCell ? 0.35 : 0.45) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!weakSelf || weakSelf.menuToken != token || weakSelf.moved || weakSelf.menuShown) return;
                 weakSelf.menuShown = YES;
-                UICollectionViewCell *cell = [weakSelf.collection cellForItemAtIndexPath:weakSelf.pressIndexPath];
-                [weakSelf showActionsForEntry:weakSelf.pressEntry cell:cell];
+                if (weakSelf.pressEntry) {
+                    UICollectionViewCell *cell = [weakSelf.collection cellForItemAtIndexPath:weakSelf.pressIndexPath];
+                    [weakSelf showActionsForEntry:weakSelf.pressEntry cell:cell];
+                } else {
+                    [weakSelf showSettings];
+                }
             });
             break;
         }
         case UIGestureRecognizerStateChanged: {
-            if (!self.pressEntry || self.menuShown) return;
+            if (self.menuShown) return;
             CGFloat dx = point.x - self.pressStart.x;
             CGFloat dy = point.y - self.pressStart.y;
             if (!self.moved && sqrt(dx * dx + dy * dy) > 6) {
                 self.moved = YES;
                 self.menuToken++;  // cancels the pending menu
-                self.draggingCell = YES;
-                [self.collection beginInteractiveMovementForItemAtIndexPath:self.pressIndexPath];
-                UIImpactFeedbackGenerator *dragHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                [dragHaptic impactOccurred];
+                if (self.pressEntry) {
+                    self.draggingCell = YES;
+                    [self.collection beginInteractiveMovementForItemAtIndexPath:self.pressIndexPath];
+                    UIImpactFeedbackGenerator *dragHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                    [dragHaptic impactOccurred];
+                }
             }
             if (self.draggingCell) [self.collection updateInteractiveMovementTargetPosition:point];
             break;
@@ -730,12 +793,17 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
                 self.draggingCell = NO;
                 [self.collection endInteractiveMovement];
                 [self saveOrder];
-            } else if (!self.menuShown && self.pressEntry) {
+            } else if (!self.menuShown) {
                 // Quick release before the timer: still show the menu.
-                UICollectionViewCell *cell = [self.collection cellForItemAtIndexPath:self.pressIndexPath];
-                [self showActionsForEntry:self.pressEntry cell:cell];
+                if (self.pressEntry) {
+                    UICollectionViewCell *cell = [self.collection cellForItemAtIndexPath:self.pressIndexPath];
+                    [self showActionsForEntry:self.pressEntry cell:cell];
+                } else {
+                    [self showSettings];
+                }
             }
             self.pressEntry = nil;
+            self.pressIndexPath = nil;
             break;
         }
         default: {
@@ -926,6 +994,8 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 }
 - (void)dealloc {
     if (self.nativeSearchObserver) [NSNotificationCenter.defaultCenter removeObserver:self.nativeSearchObserver];
+    // The recognizer lives on the host's view, which outlives us.
+    [self.hostLongPress.view removeGestureRecognizer:self.hostLongPress];
 }
 - (void)setHiddenUnlocked:(BOOL)unlocked {
     _hiddenUnlocked = unlocked;
@@ -986,10 +1056,19 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
         [NSUserDefaults.standardUserDefaults setBool:!compact forKey:LGCompactTop];
         [self.view setNeedsLayout];
     }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"恢复原生列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { [self showNative]; }]];
+    // Single entry point for both directions now that the toolbar and the
+    // floating "back to grid" button are gone.
+    BOOL native = self.nativeMode;
+    [sheet addAction:[UIAlertAction actionWithTitle:(native ? @"切换到网格布局" : @"切换到原生列表") style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        if (native) {
+            [self showGrid];
+        } else {
+            [self showNative];
+        }
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = self.bar;
-    sheet.popoverPresentationController.sourceRect = self.bar.bounds;
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = self.view.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {

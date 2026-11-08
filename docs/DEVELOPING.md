@@ -109,7 +109,8 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 卸载 | `containerFoldersForEntry` → `confirmUninstallEntry` → `askDeleteDataForEntry` → `performUninstallEntry` | 双重确认 + 可选删容器 |
 | 排序 | `saveOrder` / `moveItemAtIndexPath` | 存 folder 名数组；宿主已选 custom 时同步镜像 |
 | 解锁 | `footerTapped` / `setHiddenUnlocked` | 三击 → `LAContext` 认证 |
-| 设置 | `showSettings` | action sheet：列数 / 名称 / 日志 / 背景 / 顶部间距 / 恢复原生 |
+| 设置 | `showSettings` | action sheet：列数 / 名称 / 日志 / 背景 / 顶部间距 / 切换到原生 |
+| 原生长按 | `handleHostLongPress` / `lgEnsureHostPress` / `LGIsInteractive` | 导航栏与列表空白处唤出“切换到网格布局”；面板在原生模式是隐藏的，所以手势借挂宿主 `nav.view` |
 | 背景 | `chooseBackground` / `applyBackground` / `removeBackground` | PHPicker，最长边压到 2200px 存 JPEG |
 
 ---
@@ -168,12 +169,13 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 ```
 panel       = view.bounds                    ← 铺满，盖住标签栏毛玻璃
   backgroundView / dimView = panel.bounds    ← 背景图 + 35% 黑色遮罩
-  bar         = (16, top, w-32, 40)          ← 恢复原生 / 网格设置
-  search      = (4, top+40, w-8, 48)         ← 宿主有原生搜索框时隐藏
+  search      = (4, top, w-8, 48)            ← 宿主有原生搜索框时隐藏
   collection  = (0, top+headerHeight, w, 剩余高度)
   footer      = 贴底，距标签栏 14pt
-returnButton = 右下角胶囊（只在原生模式显示）
 ```
+
+`headerHeight` = 48；检测到宿主原生搜索框时改用 8。v25 起顶部没有工具栏，
+网格直接贴着导航栏，不再留 40pt 的工具条空档。
 
 `top` 的来源：优先用 `navigationBar` 底边（`lgTopInset`），因为 `safeAreaInsets.top`
 包含大标题区域，直接用会留一大块空白。`compactTop` 再减 44pt。
@@ -216,7 +218,7 @@ returnButton = 右下角胶囊（只在原生模式显示）
 | 加排序方式（名称/安装时间） | `LGReadApps` 末尾的 `sortUsingComparator` | 安装时间可用 `.app` 目录的 creationDate |
 | 长按菜单加一项 | `showActionsForEntry` | 卸载项对共享应用是隐藏的，别破坏这个判断 |
 | 换空状态文案 / 加引导 | `loadView` 里 `self.empty` | |
-| 顶部工具条加按钮 | `loadView` 里 `self.bar` 的 `arrangedSubviews` | 几何在 `viewDidLayoutSubviews` 里算，加按钮要重新算宽度 |
+| 想把顶部按钮加回来 | v25 已删除；要恢复就在 `loadView` 建 `UIStackView`，并把 `viewDidLayoutSubviews` 里 `search` 的 y 改回 `top+40`、`headerHeight` 加回 40 |
 | 改启动方式（不走 URL） | `didSelectItemAtIndexPath` | 上游说明：内存模型调不到，只能走 `livecontainer-launch` URL |
 | 兼容新版 LiveContainer | `LGHost` 的版本门禁 + `LGFindList` 的页面识别 | 先看日志里的 view hierarchy dump |
 
@@ -240,7 +242,7 @@ returnButton = 右下角胶囊（只在原生模式显示）
 
 | 手段 | 怎么做 |
 |---|---|
-| 插件日志 | `Library/Logs/LCGridLayout.log`，或在「网格设置 → 导出调试日志」 |
+| 插件日志 | `Library/Logs/LCGridLayout.log`，或在「长按空白 → 导出调试日志」 |
 | 确认加载 | 日志第一行必须是 `Host gate passed: LiveContainer <版本> ...; LCGridLayout_vNN.dylib loaded` |
 | 确认挂载 | 必须有 `Mounted on native app-list hosting controller after N ms`；只有第一行不算成功 |
 | 没挂上 | 等 6 秒，日志会附 view hierarchy dump，改 `LGFindList` 前先看它 |

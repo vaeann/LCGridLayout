@@ -29,9 +29,39 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
-## 业务源码
+## v25 — 移除顶栏，入口统一为长按空白（2026-11-08）
 
-**`Sources/LCGridLayout.m` 在本时间点未做任何修改**，与上游 v24 一致。
-构建产物与上游 Release 行为相同。
+需求：顶部「恢复原生」和「网格设置」两个按钮连占位一起去掉，下方元素上顶；
+原生列表的「返回网格」浮动按钮也去掉；两个方向都改为长按空白处唤出菜单。
 
-（二次开发开始后，在这张表里追加每个版本改了哪个函数、为什么改。）
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | 类声明 | 删 `bar` / `returnButton` 属性；新增 `hostLongPress`；类补 `UIGestureRecognizerDelegate` |
+| 同上 | `loadView` | 删除 `bar`（两个按钮 + `UIStackView`）与 `returnButton` 的创建；长按手势从 `collection` 改挂 `panel`；新建 `hostLongPress`（0.5s，默认禁用） |
+| 同上 | `viewDidLayoutSubviews` | 删 `bar.frame` 与 `returnButton.frame`；`search.y` 由 `top+40` 改为 `top`；`headerHeight` 由 `40+(8 or 48)` 改为 `8 or 48`；末尾调 `lgEnsureHostPress` |
+| 同上 | `applyMode` | 不再控制 `returnButton`；改为开关 `hostLongPress.enabled` 并重挂手势 |
+| 同上 | `handleLongPress` | `indexPath == nil` 不再直接 return，改走空白分支：按住 0.45s 或快速松手弹 `showSettings`，移动超过 6pt 取消；空白分支不出触感、不进入拖动 |
+| 同上 | 新增 `LGIsInteractive` | 从命中视图向上找，遇到 `UIControl`/`UICollectionViewCell`/`UITableViewCell` 判为交互元素，遇到列表容器判为空白 |
+| 同上 | 新增 `lgEnsureHostPress` | 把 `hostLongPress` 挂到宿主 `navigationController.view`，覆盖导航栏与整个列表区域（原生模式下我们的 panel 是隐藏的，收不到触摸） |
+| 同上 | 新增 `gestureRecognizerShouldBegin:` | 命中交互元素时拒绝识别，保证原生按钮与列表行照常工作 |
+| 同上 | 新增 `handleHostLongPress` / `showNativeSwitchMenu` | 原生模式长按空白 → 精简菜单（只有「切换到网格布局」+「取消」） |
+| 同上 | `showSettings` | 末项改为动态切换文案与动作；iPad popover 锚点由 `bar` 改为 `view` |
+| 同上 | `exportLog` | iPad popover 锚点由 `bar` 改为 `view` |
+| 同上 | `dealloc` | 从宿主 view 移除 `hostLongPress` |
+| `VERSION` | | 24 → 25 |
+
+### 为什么没有改原生排序菜单
+
+最初设想是在 LiveContainer 排序菜单（默认 / 名称升序 / 名称降序 / 上次打开 / 安装时间 / 自定义）
+里加一项「网格布局」。查 `LCSS/LiveContainerSwiftUI/Views/AppList/LCAppListView.swift` 后确认做不到：
+
+```swift
+Menu {
+    Picker("Sort by", selection: $sharedAppSortManager.appSortType) {
+        ForEach(AppSortType.allCases, id: \.self) { ... }   // 编译期枚举
+    }
+}
+```
+
+选项来自 `AppSortType: CaseIterable`，运行时无法追加 case，SwiftUI 的 `Menu` 也没有
+外部注入子项的 API。不改 IPA、不 hook 的前提下只能放弃，最终仍用长按。

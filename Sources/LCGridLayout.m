@@ -208,6 +208,17 @@ static BOOL LGIsSearchField(UIView *view) {
     NSString *name = NSStringFromClass(view.class);
     return [name containsString:@"SearchField"] || [name containsString:@"SearchBar"];
 }
+// Same walk, but collecting the views themselves so they can be suppressed and
+// later restored. Deliberately ignores hidden/alpha, otherwise a suppressed bar
+// could never be found again.
+static void LGCollectSearchBars(UIView *view, UIView *skip, NSMutableArray<UIView *> *result) {
+    if (!view || view == skip) return;
+    if (LGIsSearchField(view) && view.window) {
+        [result addObject:view];
+        return;
+    }
+    for (UIView *sub in view.subviews) LGCollectSearchBars(sub, skip, result);
+}
 static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSValue *> *result) {
     if (!view || view == skip || view.hidden || view.alpha < 0.01) return;
     if (LGIsSearchField(view) && view.window) {
@@ -352,11 +363,14 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) CGFloat lastTopInset;
 @property(nonatomic) UIEdgeInsets lastSafeInsets;
 @property(nonatomic, strong) NSMutableSet<NSString *> *pendingIcons;
+// LiveContainer search bars we faded out in grid mode, kept for restoration.
+@property(nonatomic, strong) NSHashTable<UIView *> *suppressedSearchViews;
 @property(nonatomic, strong) id nativeSearchObserver;
 - (CGFloat)lgTopInset;
 - (void)lgSyncLayout;
 - (void)refresh;
 - (void)lgEnsureHostPress;
+- (void)lgSuppressNativeSearch:(BOOL)suppress;
 - (BOOL)lgGestureAllowsTouch:(UIGestureRecognizer *)gesture;
 - (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)handleNavDoubleTap:(UITapGestureRecognizer *)gesture;
@@ -372,6 +386,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.icons = [NSCache new];
     self.icons.countLimit = 150;
     self.pendingIcons = [NSMutableSet new];
+    self.suppressedSearchViews = [NSHashTable weakObjectsHashTable];
     self.entries = @[];
     self.filtered = @[];
     self.panel = [UIView new];
@@ -466,6 +481,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // bounds, so viewDidLayoutSubviews never fires and the header keeps its old
 // offset (the big blank above the toolbar). Re-layout when that geometry moves.
 - (void)lgSyncLayout {
+    // SwiftUI rebuilds the page (and its search bar) on tab switches; re-apply
+    // the fade so the entry point never comes back while the grid is showing.
+    if (!self.nativeMode) [self lgSuppressNativeSearch:YES];
     CGFloat top = [self lgTopInset];
     UIEdgeInsets safe = self.view.safeAreaInsets;
     BOOL hasNativeSearch = !CGRectIsEmpty([self lgTopNativeSearchFrame]);
@@ -491,36 +509,35 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    // The overlay covers the whole host view (so nothing leaks through the
-    // translucent tab bar); interactive content stays inside the safe area.
+    // The overlay view itself stays full-bleed so touches outside the panel still
+    // pass through (LGPassView), but the panel starts below the navigation bar:
+    // the host's buttons and "App" large title must stay visible and untouched.
     UIEdgeInsets safe = self.view.safeAreaInsets;
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
     BOOL navHidden = self.navigationController.isNavigationBarHidden;
-    // With the host bar hidden, LiveContainer's search field sits inside the
-    // content area we already cover; letting it influence geometry would hide
-    // our own search bar for no reason.
     CGRect nativeSearch = navHidden ? CGRectZero : [self lgTopNativeSearchFrame];
     BOOL hasNativeTopSearch = !CGRectIsEmpty(nativeSearch);
     self.search.hidden = hasNativeTopSearch;
     CGFloat top = [self lgTopInset] + 2;
-    // Compact mode removes the phantom large-title inset. With the bar hidden
-    // there is no large title, so the compensation must not apply.
-    if (!hasNativeTopSearch && !navHidden && [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top = MAX(0, top - 44);
+    // Tight means "flush under the bar"; loose adds breathing room. The old -44
+    // (which cancelled the large-title inset) no longer applies now that the
+    // title is visible — it pushed the search field up behind the bar.
+    if (!hasNativeTopSearch && !navHidden && ![NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top += 24;
     if (hasNativeTopSearch) top = MAX(top, CGRectGetMaxY(nativeSearch) + 4);
     self.lastTopInset = [self lgTopInset];
     self.lastSafeInsets = safe;
     self.hadNativeTopSearch = hasNativeTopSearch;
-    self.panel.frame = self.view.bounds;
+    CGFloat panelHeight = MAX(0, h - top);
+    self.panel.frame = CGRectMake(0, top, w, panelHeight);
     self.backgroundView.frame = self.panel.bounds;
     self.dimView.frame = self.panel.bounds;
-    self.search.frame = CGRectMake(4, top, MAX(0,w-8), 48);
+    // Everything below is in panel coordinates.
+    self.search.frame = CGRectMake(4, 0, MAX(0,w-8), 48);
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
-    self.footer.frame = CGRectMake(0, MAX(0, h-safe.bottom-footerHeight-footerGap), w, footerHeight);
-    // No toolbar row above the search field any more; the header is just the
-    // search bar (or a small gap when LiveContainer's own search field is used).
+    self.footer.frame = CGRectMake(0, MAX(0, panelHeight-safe.bottom-footerHeight-footerGap), w, footerHeight);
     CGFloat headerHeight = hasNativeTopSearch ? 8 : 48;
-    CGRect frame = CGRectMake(0, top+headerHeight, w, MAX(0, h-top-headerHeight-safe.bottom-footerHeight-footerGap-2));
+    CGRect frame = CGRectMake(0, headerHeight, w, MAX(0, panelHeight-headerHeight-safe.bottom-footerHeight-footerGap-2));
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
     [self lgEnsureHostPress];
@@ -531,6 +548,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.hostLongPress.enabled = self.nativeMode;
     // The host navigation bar (buttons and large title) stays visible on purpose:
     // the grid only replaces the search field and the app list below it.
+    [self lgSuppressNativeSearch:!self.nativeMode];
     [self lgEnsureHostPress];
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
@@ -749,6 +767,31 @@ static BOOL LGIsInteractive(UIView *view) {
     return NO;
 }
 
+// LiveContainer's search bar lives in the navigation area. Even with the grid on
+// top, a double tap near the top can activate it and its search UI covers
+// everything. Fading it out (keeping the layout, unlike hidden) removes that
+// entry point; the original alpha is restored in native mode.
+- (void)lgSuppressNativeSearch:(BOOL)suppress {
+    if (suppress) {
+        UIWindow *window = self.view.window;
+        if (!window) return;
+        NSMutableArray<UIView *> *bars = [NSMutableArray array];
+        LGCollectSearchBars(window.rootViewController.view, self.view, bars);
+        for (UIView *bar in bars) {
+            if (bar.alpha < 0.01) continue;
+            [self.suppressedSearchViews addObject:bar];
+            bar.alpha = 0;
+            bar.userInteractionEnabled = NO;
+        }
+    } else {
+        for (UIView *bar in self.suppressedSearchViews.allObjects) {
+            bar.alpha = 1;
+            bar.userInteractionEnabled = YES;
+        }
+        [self.suppressedSearchViews removeAllObjects];
+    }
+}
+
 - (void)lgEnsureHostPress {
     // Native mode hides our panel, so the only place left to receive gestures is
     // the host navigation controller's view. Attaching them there also covers
@@ -778,11 +821,11 @@ static BOOL LGIsInteractive(UIView *view) {
         CGPoint inSelf = [gesture locationInView:self.view];
         return inSelf.y > [self lgTopInset] + 64;
     }
-    // Grid: any blank spot in the grid. The strip above the search field is only
-    // a few points tall now that the host bar is visible again, so limiting the
-    // double tap to it would make the gesture practically unhittable.
+    // Grid: any blank spot inside the panel. The panel no longer covers the
+    // navigation bar, so a negative y here means the touch landed on the bar —
+    // leave that to LiveContainer.
     CGPoint inPanel = [gesture locationInView:self.panel];
-    return inPanel.y >= 0;
+    return inPanel.y >= 0 && inPanel.y <= self.panel.bounds.size.height;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {

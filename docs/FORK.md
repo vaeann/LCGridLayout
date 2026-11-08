@@ -29,6 +29,23 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## v29 — 面板从导航栏下沿开始，原生搜索栏压暗（2026-11-08）
+
+实测 v28：网格模式下「App」大标题消失，双击空白仍会叫出 LiveContainer 的搜索。
+
+两个问题同一个根因：`edgesForExtendedLayout` 让 `host.view` 延伸到了导航栏下方，
+面板铺满全屏（`panel = view.bounds`），把大标题那块一起盖住了；`compactTop` 的 `-44`
+又把我方搜索框顶进导航栏底下，于是双击落点和视觉都对不上。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `viewDidLayoutSubviews` | `panel` 改为 `(0, top, w, h-top)`，即从导航栏下沿开始，不再覆盖导航栏；所有子视图改到面板坐标系，`footer` / `collection` 用 `panelHeight` 计算 |
+| 同上 | 同上 | 去掉 `compactTop` 的 `-44`（大标题可见后这个补偿会把搜索框推上去）；紧凑 = 紧贴栏底，宽松 = 再加 24pt |
+| 同上 | 新增 `LGCollectSearchBars` / `lgSuppressNativeSearch:` | 遍历窗口收集 LC 的 search bar，网格模式下 `alpha = 0` + 禁用交互（保留布局，比 `hidden` 温和），并记入 weak 表以便恢复 |
+| 同上 | `lgSyncLayout` | 每 tick 重新压制一次，防止 SwiftUI 切 tab 重建搜索栏后入口复活 |
+| 同上 | `lgGestureAllowsTouch:` | 网格双击区域改为「面板内任意空白」（`0 <= y <= panelHeight`）；面板已不覆盖导航栏，负值就代表落在栏上，交给 LC |
+| `VERSION` | | 28 → 29 |
+
 ## v28 — 网格只覆盖搜索栏与列表，保留导航栏（2026-11-08）
 
 需求：原生页顶部有一排按钮（➕ / ❓ / 🔗 / 排序）和「App」大标题，网格模式下这些不要被覆盖，

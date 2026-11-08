@@ -323,6 +323,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic, strong) UIView *dimView;
 @property(nonatomic, strong) UICollectionView *collection;
 @property(nonatomic, strong) UISearchBar *search;
+// Floating layout switch. Lives on our own full-screen view, so it works in
+// both modes and never depends on the host reconstructing its toolbar.
+@property(nonatomic, strong) UIButton *returnButton;
 @property(nonatomic, strong) UILabel *empty;
 @property(nonatomic, strong) NSArray<LGEntry *> *entries;
 @property(nonatomic, strong) NSArray<LGEntry *> *filtered;
@@ -350,7 +353,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgSyncLayout;
 - (void)refresh;
 - (void)lgSuppressNativeSearch:(BOOL)suppress;
-- (void)lgInstallSwitchButton;
+- (void)lgUpdateReturnButton;
 - (void)handleSheetAction:(LGSheetAction)action;
 @end
 
@@ -412,6 +415,15 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
     self.longPress.minimumPressDuration = 0.3;
     [self.panel addGestureRecognizer:self.longPress];
+    self.returnButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    config.imagePadding = 8;
+    config.baseBackgroundColor = UIColor.secondarySystemBackgroundColor;
+    config.baseForegroundColor = UIColor.labelColor;
+    self.returnButton.configuration = config;
+    [self.returnButton addTarget:self action:@selector(toggleMode) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.returnButton];
     self.footer = [UILabel new];
     self.footer.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     self.footer.textColor = UIColor.secondaryLabelColor;
@@ -449,8 +461,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     // SwiftUI rebuilds the page (and its search bar) on tab switches; re-apply
     // the fade so the entry point never comes back while the grid is showing.
     if (!self.nativeMode) [self lgSuppressNativeSearch:YES];
-    // SwiftUI also reconciles navigationItem, which can drop our button.
-    [self lgInstallSwitchButton];
     CGFloat top = [self lgTopInset];
     UIEdgeInsets safe = self.view.safeAreaInsets;
     BOOL hasNativeSearch = !CGRectIsEmpty([self lgTopNativeSearchFrame]);
@@ -507,6 +517,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     CGRect frame = CGRectMake(0, headerHeight, w, MAX(0, panelHeight-headerHeight-safe.bottom-footerHeight-footerGap-2));
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
+    // Floating switch: bottom right, clear of the tab bar.
+    CGFloat buttonWidth = 124, buttonHeight = 44;
+    self.returnButton.frame = CGRectMake(MAX(8, w-buttonWidth-16), MAX(0, h-safe.bottom-buttonHeight-14), buttonWidth, buttonHeight);
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }
 - (void)applyMode {
@@ -514,7 +527,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     // The host navigation bar (buttons and large title) stays visible on purpose:
     // the grid only replaces the search field and the app list below it.
     [self lgSuppressNativeSearch:!self.nativeMode];
-    [self lgInstallSwitchButton];
+    [self lgUpdateReturnButton];
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
 
@@ -719,8 +732,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 
 #pragma mark - Host bar button and search suppression
 
-static const void *LGSwitchButtonKey = &LGSwitchButtonKey;
-
 // LiveContainer's search bar lives in the navigation area. Even with the grid on
 // top, its expansion animation still runs and pushes the content around. Hiding
 // it (rather than fading) removes both the layout slot and the entry point; the
@@ -744,46 +755,15 @@ static const void *LGSwitchButtonKey = &LGSwitchButtonKey;
     }
 }
 
-// The single entry point for switching layouts: one button on the real
-// navigation bar that shows the *target* mode. Living on the host bar means it
-// never competes with LiveContainer's own gestures.
-- (void)lgInstallSwitchButton {
-    UIViewController *host = self.parentViewController;
-    if (!host) return;
-    UIBarButtonItem *item = objc_getAssociatedObject(host, LGSwitchButtonKey);
-    if (!item) {
-        item = [[UIBarButtonItem alloc] initWithTitle:@"" style:UIBarButtonItemStylePlain target:self action:@selector(toggleMode)];
-        objc_setAssociatedObject(host, LGSwitchButtonKey, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        LGLog([NSString stringWithFormat:@"Toolbar probe: left=%lu right=%lu title=%@",
-               (unsigned long)host.navigationItem.leftBarButtonItems.count,
-               (unsigned long)host.navigationItem.rightBarButtonItems.count,
-               host.navigationItem.title ?: @"(nil)"]);
-    }
-    item.target = self;   // the controller is rebuilt on every mount
+// The floating switch is the only entry point: it sits on our own view, so it is
+// visible in both modes and immune to SwiftUI rebuilding the navigation bar.
+- (void)lgUpdateReturnButton {
+    UIButtonConfiguration *config = self.returnButton.configuration;
     BOOL toNative = !self.nativeMode;
-    item.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.2x2")];
-    item.accessibilityLabel = toNative ? @"列表布局" : @"宫格布局";
-
-    // iOS 16+ SwiftUI toolbars are backed by item groups; setting
-    // rightBarButtonItems on such a bar is silently ignored. Try groups first
-    // and fall back to the legacy array only when there are none.
-    if (@available(iOS 16.0, *)) {
-        NSArray<UIBarButtonItemGroup *> *groups = host.navigationItem.trailingItemGroups;
-        if (groups.count > 0) {
-            for (UIBarButtonItemGroup *group in groups) {
-                if ([group.barButtonItems containsObject:item]) return;
-            }
-            UIBarButtonItemGroup *ours = [[UIBarButtonItemGroup alloc] initWithBarButtonItems:@[item] representativeItem:nil];
-            host.navigationItem.trailingItemGroups = [groups arrayByAddingObject:ours];
-            return;
-        }
-    }
-
-    NSMutableArray<UIBarButtonItem *> *items = [host.navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
-    if (![items containsObject:item]) {
-        [items addObject:item];
-        host.navigationItem.rightBarButtonItems = items;
-    }
+    config.title = toNative ? @"原生布局" : @"宫格布局";
+    config.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.3x3.fill")];
+    self.returnButton.configuration = config;   // struct: reassign to apply
+    self.returnButton.accessibilityLabel = toNative ? @"切换到原生布局" : @"切换到宫格布局";
 }
 
 - (void)toggleMode {

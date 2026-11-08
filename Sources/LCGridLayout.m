@@ -357,7 +357,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgSyncLayout;
 - (void)refresh;
 - (void)lgEnsureHostPress;
-- (void)lgSetNavigationBarHidden:(BOOL)hidden;
 - (BOOL)lgGestureAllowsTouch:(UIGestureRecognizer *)gesture;
 - (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)handleNavDoubleTap:(UITapGestureRecognizer *)gesture;
@@ -492,10 +491,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    // SwiftUI may re-show the bar while rebuilding the page; keep the grid
-    // full-bleed. applyMode runs before the view is in a navigation stack, so
-    // this is also the first place the hide can actually take effect.
-    [self lgSetNavigationBarHidden:!self.nativeMode];
     // The overlay covers the whole host view (so nothing leaks through the
     // translucent tab bar); interactive content stays inside the safe area.
     UIEdgeInsets safe = self.view.safeAreaInsets;
@@ -534,19 +529,12 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
     self.hostLongPress.enabled = self.nativeMode;
-    // Grid mode owns the whole screen: hiding the host bar removes both the
-    // large title and LiveContainer's search field, which otherwise swallows a
-    // double tap on the top strip and covers the grid with its search UI.
-    [self lgSetNavigationBarHidden:!self.nativeMode];
+    // The host navigation bar (buttons and large title) stays visible on purpose:
+    // the grid only replaces the search field and the app list below it.
     [self lgEnsureHostPress];
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
 
-- (void)lgSetNavigationBarHidden:(BOOL)hidden {
-    UINavigationController *nav = self.navigationController;
-    if (!nav || nav.isNavigationBarHidden == hidden) return;
-    [nav setNavigationBarHidden:hidden animated:NO];
-}
 - (void)showNative { [self.view endEditing:YES]; self.nativeMode = YES; [self applyMode]; }
 - (void)showGrid { self.nativeMode = NO; [self applyMode]; [self refresh]; }
 - (void)refresh {
@@ -785,16 +773,16 @@ static BOOL LGIsInteractive(UIView *view) {
     if (LGIsInteractive([view hitTest:point withEvent:nil])) return NO;
     if (gesture != self.navDoubleTap) return YES;
     if (self.nativeMode) {
-        // Native list: keep off the navigation bar. A double tap up there belongs
-        // to LiveContainer and opens its search UI, which covers everything.
-        // Only blank rows below the native search field count.
+        // Native list: stay below the native search field. The navigation bar
+        // belongs to LiveContainer — a double tap up there opens its search.
         CGPoint inSelf = [gesture locationInView:self.view];
         return inSelf.y > [self lgTopInset] + 64;
     }
-    // Grid: the blank strip above our search field. With the host bar hidden
-    // that is the whole area under the Dynamic Island.
+    // Grid: any blank spot in the grid. The strip above the search field is only
+    // a few points tall now that the host bar is visible again, so limiting the
+    // double tap to it would make the gesture practically unhittable.
     CGPoint inPanel = [gesture locationInView:self.panel];
-    return inPanel.y >= 0 && inPanel.y < CGRectGetMinY(self.search.frame);
+    return inPanel.y >= 0;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
@@ -1115,8 +1103,6 @@ static BOOL LGIsInteractive(UIView *view) {
     // The recognizers live on the host's view, which outlives us.
     [self.hostLongPress.view removeGestureRecognizer:self.hostLongPress];
     [self.navDoubleTap.view removeGestureRecognizer:self.navDoubleTap];
-    // Never leave the host without its navigation bar.
-    [self lgSetNavigationBarHidden:NO];
 }
 - (void)setHiddenUnlocked:(BOOL)unlocked {
     _hiddenUnlocked = unlocked;
@@ -1614,9 +1600,6 @@ static void LGTick(void) {
             }
             [grid lgSyncLayout];
         } else {
-            // Leaving the page (tab switch, pushed screen) must never leave the
-            // host without its navigation bar.
-            if (!grid.wasAway) [grid lgSetNavigationBarHidden:NO];
             grid.wasAway = YES;
         }
     }

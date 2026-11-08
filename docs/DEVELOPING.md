@@ -111,7 +111,7 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 解锁 | `footerTapped` / `setHiddenUnlocked` | 三击 → `LAContext` 认证 |
 | 设置 | `showSettings` + `LGSheetController` | 卡片式 sheet（medium/large detent）：分段控件管列数与间距，开关管名称，按钮管背景与日志 |
 | 双击切换 | `navDoubleTap` / `handleNavDoubleTap` / `confirmSwitchToNative` | 网格：搜索框以上的空白；原生：搜索框以下的列表空白。先弹确认框再切 |
-| 导航栏 | `lgSetNavigationBarHidden:` | 网格模式隐藏宿主导航栏（否则双击会激活 LC 的搜索并盖住整页），原生模式恢复；`LGTick` 在页面失活和 `dealloc` 时都会兜底恢复 |
+| 覆盖范围 | — | 网格只覆盖 `host.view`（= 搜索栏 + app 列表）。导航栏在 `nav.view` 上，天然不被覆盖，这是 v28 明确保留的行为 |
 | 居中卡片 | `LGCardAlertController` | 原生模式的「切换到网格布局」用它，视觉与 `LGSheetController` 一致 |
 | 原生长按 | `handleHostLongPress` / `lgEnsureHostPress` / `LGIsInteractive` | 导航栏与列表空白处唤出“切换到网格布局”；面板在原生模式是隐藏的，所以手势借挂宿主 `nav.view` |
 | 顶部边界 | `lgTopBlankLimitInView` | 算“顶部空白”的下边界：搜索框顶部，没有搜索框则用导航栏底部 |
@@ -173,7 +173,7 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 ```
 panel       = view.bounds                    ← 铺满，盖住标签栏毛玻璃
   backgroundView / dimView = panel.bounds    ← 背景图 + 35% 黑色遮罩
-  0 ──────── 状态栏（网格模式下这里是空白，双击区）
+  （导航栏与大标题在 host.view 之外，网格不覆盖）
   search      = (4, top, w-8, 48)            ← 宿主有原生搜索框时隐藏
   collection  = (0, top+headerHeight, w, 剩余高度)
   footer      = 贴底，距标签栏 14pt

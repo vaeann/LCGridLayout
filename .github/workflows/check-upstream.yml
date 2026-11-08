@@ -58,7 +58,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          COUNT="$(gh issue list --state open --label upstream --json number --jq 'length')"
+          # label 还没建过时 gh 可能返回非零，兜底成 0，避免误判成"已有 issue"。
+          COUNT="$(gh issue list --state open --label upstream --json number --jq 'length' 2>/dev/null || echo 0)"
+          COUNT="${COUNT:-0}"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "未关闭的上游提醒 issue: $COUNT"
 

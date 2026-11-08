@@ -109,8 +109,10 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 卸载 | `containerFoldersForEntry` → `confirmUninstallEntry` → `askDeleteDataForEntry` → `performUninstallEntry` | 双重确认 + 可选删容器 |
 | 排序 | `saveOrder` / `moveItemAtIndexPath` | 存 folder 名数组；宿主已选 custom 时同步镜像 |
 | 解锁 | `footerTapped` / `setHiddenUnlocked` | 三击 → `LAContext` 认证 |
-| 设置 | `showSettings` | action sheet：列数 / 名称 / 日志 / 背景 / 顶部间距 / 切换到原生 |
+| 设置 | `showSettings` + `LGSheetController` | 卡片式 sheet（medium/large detent）：分段控件管列数与间距，开关管名称，按钮管背景与日志 |
+| 双击切换 | `navDoubleTap` / `handleNavDoubleTap` / `confirmSwitchToNative` | 只在搜索框上方的顶部空白生效；先弹确认框再切 |
 | 原生长按 | `handleHostLongPress` / `lgEnsureHostPress` / `LGIsInteractive` | 导航栏与列表空白处唤出“切换到网格布局”；面板在原生模式是隐藏的，所以手势借挂宿主 `nav.view` |
+| 顶部边界 | `lgTopBlankLimitInView` | 算“顶部空白”的下边界：搜索框顶部，没有搜索框则用导航栏底部 |
 | 背景 | `chooseBackground` / `applyBackground` / `removeBackground` | PHPicker，最长边压到 2200px 存 JPEG |
 
 ---

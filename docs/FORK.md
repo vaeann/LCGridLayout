@@ -29,6 +29,23 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## v26 — 双击切换布局、设置面板改卡片（2026-11-08）
+
+需求：原生 ↔ 网格支持双击直接切换（带「是 / 否」确认，双击区域限定在搜索框上方的顶部空白，
+即灵动岛下方那一条）；长按呼出设置的行为保持不变、整页空白都生效；弹出的设置菜单原来是一条
+细长的 action sheet，改成规整的卡片面板。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | 新增 `LGSheetAction` + `LGSheetController` | 卡片式设置面板：标题 + 摘要、列数分段、名称开关、顶部间距分段、背景选择/移除、导出日志、切换到原生列表；`UISheetPresentationController` 的 medium/large detent，可上拉放大 |
+| 同上 | 新增 `navDoubleTap` | 一个双击手势挂在宿主 `nav.view`，两种模式共用，按 `nativeMode` 决定方向 |
+| 同上 | `lgTopBlankLimitInView:` | 算出「顶部空白」的下边界：我们的搜索框顶部 → 宿主搜索框顶部 → 导航栏底部，逐级回退 |
+| 同上 | `lgGestureAllowsTouch:` / `gestureRecognizer:shouldReceiveTouch:` | 用 `shouldReceiveTouch` 在触摸开始就排除 `UIControl` / cell，并给双击加上顶部区域限制。这一步放在 `shouldReceiveTouch` 而不是 `shouldBegin`，是为了不让单击图标的启动被双击判定拖慢 |
+| 同上 | `handleNavDoubleTap` / `confirmSwitchToNative:` | 双击后弹「确定切换到…吗？是 / 否」，确认后才切 |
+| 同上 | `showSettings` / `handleSheetAction:` | 从 action sheet 改为呈现 `LGSheetController`；列数、名称、间距改完面板不关闭、背后网格实时更新，背景与日志在面板关闭后再弹选择器 |
+| 同上 | `lgEnsureHostPress` | 同时挂 `hostLongPress` 与 `navDoubleTap` |
+| `VERSION` | | 25 → 26 |
+
 ## v25 — 移除顶栏，入口统一为长按空白（2026-11-08）
 
 需求：顶部「恢复原生」和「网格设置」两个按钮连占位一起去掉，下方元素上顶；

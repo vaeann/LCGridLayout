@@ -281,6 +281,31 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 }
 @end
 
+#pragma mark - Settings sheet
+
+typedef NS_ENUM(NSInteger, LGSheetAction) {
+    LGSheetActionColumns4 = 0,
+    LGSheetActionColumns5,
+    LGSheetActionToggleNames,
+    LGSheetActionToggleCompact,
+    LGSheetActionChooseBackground,
+    LGSheetActionRemoveBackground,
+    LGSheetActionExportLog,
+    LGSheetActionSwitchMode,
+};
+
+// Card layout instead of the long, thin alert action sheet the settings used to
+// be. Purely presentational: it reports which control was used and the grid
+// controller decides what to change.
+@interface LGSheetController : UIViewController
+@property(nonatomic, copy) NSString *summary;
+@property(nonatomic) NSInteger columns;
+@property(nonatomic) BOOL showNames;
+@property(nonatomic) BOOL compactTop;
+@property(nonatomic) BOOL hasBackground;
+@property(nonatomic, copy) void (^handler)(LGSheetAction action);
+@end
+
 @interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate, UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIView *panel;
 @property(nonatomic, strong) UIImageView *backgroundView;
@@ -300,9 +325,17 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 @property(nonatomic) NSInteger menuToken;
 @property(nonatomic, strong) UILabel *footer;
 @property(nonatomic, strong) UILongPressGestureRecognizer *longPress;
+// The footer counter is the settings entry: a fixed, always-visible target
+// beats "long press somewhere empty".
+@property(nonatomic, strong) UILongPressGestureRecognizer *footerPress;
 // Native list mode: the panel is hidden, so nothing of ours can receive touches.
 // This one rides on the host navigation controller's view instead.
 @property(nonatomic, strong) UILongPressGestureRecognizer *hostLongPress;
+// Double tap in the blank strip under the Dynamic Island — above the search
+// field — switches layout after a confirmation. One recognizer serves both
+// modes: it lives on the host navigation controller's view and picks the
+// direction from nativeMode.
+@property(nonatomic, strong) UITapGestureRecognizer *navDoubleTap;
 @property(nonatomic, strong) NSIndexPath *pressIndexPath;
 @property(nonatomic, strong) LGEntry *pressEntry;
 @property(nonatomic) CGPoint pressStart;
@@ -314,6 +347,14 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 - (CGFloat)lgTopInset;
 - (void)lgSyncLayout;
 - (void)refresh;
+- (void)lgEnsureHostPress;
+- (BOOL)lgGestureAllowsTouch:(UIGestureRecognizer *)gesture;
+- (CGFloat)lgTopBlankLimitInView:(UIView *)view;
+- (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture;
+- (void)handleNavDoubleTap:(UITapGestureRecognizer *)gesture;
+- (void)confirmSwitchToNative:(BOOL)toNative;
+- (void)showNativeSwitchMenu;
+- (void)handleSheetAction:(LGSheetAction)action;
 @end
 
 @implementation LGGridController
@@ -370,12 +411,9 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     self.empty.textAlignment = NSTextAlignmentCenter;
     self.collection.backgroundView = self.empty;
     [self.panel addSubview:self.collection];
-    // Long press rides on the panel rather than the collection: empty space
-    // outside the grid (below the last row, around the footer) should open the
-    // settings sheet too. A hit on a cell still takes the drag / menu path.
     self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
     self.longPress.minimumPressDuration = 0.3;
-    [self.panel addGestureRecognizer:self.longPress];
+    [self.collection addGestureRecognizer:self.longPress];
     // Native mode hides the panel, so nothing of ours can receive touches there.
     // This recognizer is attached to the host's navigation controller view
     // instead, covering everything under the Dynamic Island.
@@ -383,6 +421,9 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     self.hostLongPress.minimumPressDuration = 0.5;
     self.hostLongPress.delegate = self;
     self.hostLongPress.enabled = NO;
+    self.navDoubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleNavDoubleTap:)];
+    self.navDoubleTap.numberOfTapsRequired = 2;
+    self.navDoubleTap.delegate = self;
     self.footer = [UILabel new];
     self.footer.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     self.footer.textColor = UIColor.secondaryLabelColor;
@@ -694,24 +735,82 @@ static BOOL LGIsInteractive(UIView *view) {
 }
 
 - (void)lgEnsureHostPress {
-    // Native mode hides our panel, so the only place left to receive a long
-    // press is the host navigation controller's view. Attaching it there also
-    // covers the navigation bar — the biggest blank area under the Dynamic
-    // Island — instead of a narrow strip of list background.
+    // Native mode hides our panel, so the only place left to receive gestures is
+    // the host navigation controller's view. Attaching them there also covers
+    // the navigation bar — the blank strip under the Dynamic Island.
     UIView *navView = self.navigationController.view;
     if (!navView) return;
-    if (self.hostLongPress.view == navView) return;
-    [self.hostLongPress.view removeGestureRecognizer:self.hostLongPress];
-    [navView addGestureRecognizer:self.hostLongPress];
+    for (UIGestureRecognizer *gesture in @[self.hostLongPress, self.navDoubleTap]) {
+        if (gesture.view == navView) continue;
+        [gesture.view removeGestureRecognizer:gesture];
+        [navView addGestureRecognizer:gesture];
+    }
+}
+
+// Bottom edge of the "blank strip under the Dynamic Island": the top of the
+// search field when one is visible, otherwise the bottom of the navigation bar
+// (which already includes the expanded large title).
+- (CGFloat)lgTopBlankLimitInView:(UIView *)view {
+    CGFloat limit = CGFLOAT_MAX;
+    if (!self.panel.hidden && !self.search.hidden && self.search.window) {
+        limit = MIN(limit, CGRectGetMinY([self.search convertRect:self.search.bounds toView:view]));
+    }
+    CGRect native = [self lgTopNativeSearchFrame];   // in self.view's coordinate space
+    if (!CGRectIsEmpty(native)) {
+        limit = MIN(limit, CGRectGetMinY([self.view convertRect:native toView:view]));
+    }
+    if (limit == CGFLOAT_MAX) {
+        UINavigationBar *bar = self.navigationController.navigationBar;
+        if (bar) limit = CGRectGetMaxY([bar convertRect:bar.bounds toView:view]);
+    }
+    return limit;
+}
+
+// Anything that already handles taps must keep working, and the double tap is
+// only meant for the strip above the search field. Deciding this in
+// shouldReceiveTouch — not shouldBegin — is what keeps a single tap on an app
+// icon from being delayed while UIKit waits for a possible second tap.
+- (BOOL)lgGestureAllowsTouch:(UIGestureRecognizer *)gesture {
+    UIView *view = gesture.view;
+    if (!view) return NO;
+    CGPoint point = [gesture locationInView:view];
+    if (LGIsInteractive([view hitTest:point withEvent:nil])) return NO;
+    if (gesture == self.navDoubleTap) return point.y < [self lgTopBlankLimitInView:view];
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (gestureRecognizer == self.hostLongPress || gestureRecognizer == self.navDoubleTap) {
+        return [self lgGestureAllowsTouch:gestureRecognizer];
+    }
+    return YES;
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    if (gestureRecognizer != self.hostLongPress) return YES;
-    UIView *navView = self.navigationController.view;
-    if (!navView) return NO;
-    CGPoint point = [gestureRecognizer locationInView:navView];
-    UIView *hit = [navView hitTest:point withEvent:nil];
-    return !LGIsInteractive(hit);
+    if (gestureRecognizer == self.hostLongPress || gestureRecognizer == self.navDoubleTap) {
+        return [self lgGestureAllowsTouch:gestureRecognizer];
+    }
+    return YES;
+}
+
+- (void)handleNavDoubleTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    [self confirmSwitchToNative:!self.nativeMode];
+}
+
+- (void)confirmSwitchToNative:(BOOL)toNative {
+    if (self.presentedViewController) return;
+    NSString *title = toNative ? @"确定切换到原生列表吗？" : @"确定切换到网格布局吗？";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"是" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        if (toNative) {
+            [self showNative];
+        } else {
+            [self showGrid];
+        }
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"否" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)handleHostLongPress:(UILongPressGestureRecognizer *)gesture {
@@ -1016,65 +1115,278 @@ static BOOL LGIsInteractive(UIView *view) {
 }
 - (void)showSettings {
     if (self.presentedViewController) return;
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[LGLoadedName() stringByDeletingPathExtension]
-        message:[NSString stringWithFormat:@"已显示 %lu 个应用（隐藏 %lu，文件夹冲突 %lu，元数据异常 %lu）。应用管理、容器选择和隐藏应用解锁请使用原生列表。",
-                 (unsigned long)self.entries.count, (unsigned long)LGCountHidden,
-                 (unsigned long)LGCountAmbiguous, (unsigned long)LGCountDamaged]
-        preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSNumber *count in @[@4,@5]) {
-        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"%@ 列",count] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [NSUserDefaults.standardUserDefaults setInteger:count.integerValue forKey:LGColumns];
-            [self.collection.collectionViewLayout invalidateLayout];
-            [self.collection reloadData];
-        }]];
+    LGSheetController *sheet = [LGSheetController new];
+    sheet.summary = [NSString stringWithFormat:@"共 %lu 个应用 · 隐藏 %lu · 冲突 %lu · 异常 %lu",
+                     (unsigned long)self.entries.count,
+                     (unsigned long)LGCountHidden,
+                     (unsigned long)LGCountAmbiguous,
+                     (unsigned long)LGCountDamaged];
+    sheet.columns = [NSUserDefaults.standardUserDefaults integerForKey:LGColumns];
+    sheet.showNames = [NSUserDefaults.standardUserDefaults boolForKey:LGNames];
+    sheet.compactTop = [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop];
+    sheet.hasBackground = self.backgroundView.image != nil;
+    __weak typeof(self) weakSelf = self;
+    sheet.handler = ^(LGSheetAction action) {
+        [weakSelf handleSheetAction:action];
+    };
+    if (@available(iOS 15.0, *)) {
+        UISheetPresentationController *presentation = sheet.sheetPresentationController;
+        presentation.detents = @[UISheetPresentationControllerDetent.mediumDetent,
+                                 UISheetPresentationControllerDetent.largeDetent];
+        presentation.prefersGrabberVisible = YES;
+        presentation.preferredCornerRadius = 24;
     }
-    BOOL names = [NSUserDefaults.standardUserDefaults boolForKey:LGNames];
-    [sheet addAction:[UIAlertAction actionWithTitle:names ? @"隐藏应用名称" : @"显示应用名称" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [NSUserDefaults.standardUserDefaults setBool:!names forKey:LGNames];
-        [self.collection.collectionViewLayout invalidateLayout];
-        [self.collection reloadData];
-    }]];
-    if ([NSFileManager.defaultManager fileExistsAtPath:LGLogPath()]) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"导出调试日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            // Wait for the action sheet to finish dismissing before presenting the share sheet.
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self exportLog];
-            });
-        }]];
-    }
-    BOOL hasBackground = self.backgroundView.image != nil;
-    [sheet addAction:[UIAlertAction actionWithTitle:hasBackground ? @"更换背景图片" : @"选择背景图片" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self chooseBackground];
-    }]];
-    if (hasBackground) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"移除背景" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-            [self removeBackground];
-        }]];
-    }
-    BOOL compact = [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop];
-    [sheet addAction:[UIAlertAction actionWithTitle:(compact ? @"顶部间距：紧凑（点此改为宽松）" : @"顶部间距：宽松（点此改为紧凑）") style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [NSUserDefaults.standardUserDefaults setBool:!compact forKey:LGCompactTop];
-        [self.view setNeedsLayout];
-    }]];
-    // Single entry point for both directions now that the toolbar and the
-    // floating "back to grid" button are gone.
-    BOOL native = self.nativeMode;
-    [sheet addAction:[UIAlertAction actionWithTitle:(native ? @"切换到网格布局" : @"切换到原生列表") style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        if (native) {
-            [self showGrid];
-        } else {
-            [self showNative];
-        }
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = self.view;
-    sheet.popoverPresentationController.sourceRect = self.view.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
 }
+
+- (void)handleSheetAction:(LGSheetAction)action {
+    switch (action) {
+        case LGSheetActionColumns4:
+        case LGSheetActionColumns5: {
+            NSInteger columns = (action == LGSheetActionColumns4) ? 4 : 5;
+            [NSUserDefaults.standardUserDefaults setInteger:columns forKey:LGColumns];
+            [self.collection.collectionViewLayout invalidateLayout];
+            [self.collection reloadData];
+            break;
+        }
+        case LGSheetActionToggleNames: {
+            BOOL names = [NSUserDefaults.standardUserDefaults boolForKey:LGNames];
+            [NSUserDefaults.standardUserDefaults setBool:!names forKey:LGNames];
+            [self.collection.collectionViewLayout invalidateLayout];
+            [self.collection reloadData];
+            break;
+        }
+        case LGSheetActionToggleCompact: {
+            BOOL compact = [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop];
+            [NSUserDefaults.standardUserDefaults setBool:!compact forKey:LGCompactTop];
+            [self.view setNeedsLayout];
+            break;
+        }
+        case LGSheetActionChooseBackground:
+        case LGSheetActionRemoveBackground:
+        case LGSheetActionExportLog: {
+            // The sheet has just been dismissed; give UIKit a beat before
+            // presenting the picker or the share sheet on top of it.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (action == LGSheetActionChooseBackground) [self chooseBackground];
+                else if (action == LGSheetActionRemoveBackground) [self removeBackground];
+                else [self exportLog];
+            });
+            break;
+        }
+        case LGSheetActionSwitchMode:
+            [self showNative];
+            break;
+    }
+}
+
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) [self.collection reloadData];
 }
+@end
+
+#pragma mark - Settings sheet implementation
+
+@implementation LGSheetController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.alwaysBounceVertical = YES;
+    scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:scroll];
+
+    UIStackView *root = [UIStackView new];
+    root.axis = UILayoutConstraintAxisVertical;
+    root.spacing = 16;
+    root.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:root];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [root.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:10],
+        [root.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:20],
+        [root.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-20],
+        [root.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
+        [root.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-40],
+    ]];
+
+    [root addArrangedSubview:[self headerView]];
+
+    UILabel *summary = [UILabel new];
+    summary.text = self.summary;
+    summary.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    summary.textColor = UIColor.secondaryLabelColor;
+    summary.numberOfLines = 0;
+    summary.adjustsFontForContentSizeCategory = YES;
+    [root addArrangedSubview:summary];
+    [root setCustomSpacing:6 afterView:summary];
+
+    UISegmentedControl *columns = [[UISegmentedControl alloc] initWithItems:@[@"4 列", @"5 列"]];
+    columns.selectedSegmentIndex = self.columns == 5 ? 1 : 0;
+    [columns addTarget:self action:@selector(columnsChanged:) forControlEvents:UIControlEventValueChanged];
+    [columns.widthAnchor constraintEqualToConstant:150].active = YES;
+    [root addArrangedSubview:[self cardWithRows:@[[self rowWithTitle:@"列数" control:columns]]]];
+    [root setCustomSpacing:6 afterView:root.arrangedSubviews.lastObject];
+
+    UISwitch *names = [UISwitch new];
+    names.on = self.showNames;
+    [names addTarget:self action:@selector(namesChanged:) forControlEvents:UIControlEventValueChanged];
+    UISegmentedControl *spacing = [[UISegmentedControl alloc] initWithItems:@[@"紧凑", @"宽松"]];
+    spacing.selectedSegmentIndex = self.compactTop ? 0 : 1;
+    [spacing addTarget:self action:@selector(spacingChanged:) forControlEvents:UIControlEventValueChanged];
+    [spacing.widthAnchor constraintEqualToConstant:150].active = YES;
+    [root addArrangedSubview:[self cardWithRows:@[
+        [self rowWithTitle:@"应用名称" control:names],
+        [self separator],
+        [self rowWithTitle:@"顶部间距" control:spacing],
+    ]]];
+    [root setCustomSpacing:6 afterView:root.arrangedSubviews.lastObject];
+
+    NSMutableArray<UIView *> *backgroundRows = [NSMutableArray array];
+    UIButton *choose = [self pillButton:(self.hasBackground ? @"更换" : @"选择") action:@selector(chooseTapped)];
+    [backgroundRows addObject:[self rowWithTitle:@"背景图片" control:choose]];
+    if (self.hasBackground) {
+        [backgroundRows addObject:[self separator]];
+        UIButton *remove = [self pillButton:@"移除" action:@selector(removeTapped)];
+        remove.tintColor = UIColor.systemRedColor;
+        [backgroundRows addObject:[self rowWithTitle:@"恢复默认底色" control:remove]];
+    }
+    [root addArrangedSubview:[self cardWithRows:backgroundRows]];
+    [root setCustomSpacing:6 afterView:root.arrangedSubviews.lastObject];
+
+    UIButton *log = [UIButton buttonWithType:UIButtonTypeSystem];
+    [log setTitle:@"导出调试日志" forState:UIControlStateNormal];
+    log.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    log.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    [log addTarget:self action:@selector(exportTapped) forControlEvents:UIControlEventTouchUpInside];
+    [log.heightAnchor constraintEqualToConstant:52].active = YES;
+    [root addArrangedSubview:[self cardWithRows:@[log]]];
+    [root setCustomSpacing:20 afterView:root.arrangedSubviews.lastObject];
+
+    UIButton *switchMode = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+    config.title = @"切换到原生列表";
+    config.baseBackgroundColor = UIColor.labelColor;
+    config.baseForegroundColor = UIColor.systemBackgroundColor;
+    config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+    switchMode.configuration = config;
+    [switchMode.heightAnchor constraintEqualToConstant:50].active = YES;
+    [switchMode addTarget:self action:@selector(switchTapped) forControlEvents:UIControlEventTouchUpInside];
+    [root addArrangedSubview:switchMode];
+}
+
+- (UIView *)headerView {
+    UILabel *title = [UILabel new];
+    title.text = @"网格设置";
+    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
+    title.adjustsFontForContentSizeCategory = YES;
+    [title setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    [close setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+    close.tintColor = UIColor.tertiaryLabelColor;
+    [close addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [close.widthAnchor constraintEqualToConstant:30].active = YES;
+    [close.heightAnchor constraintEqualToConstant:30].active = YES;
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[title, [UIView new], close]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    return row;
+}
+
+- (UIView *)rowWithTitle:(NSString *)title control:(UIView *)control {
+    UIView *row = [UIView new];
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    label.adjustsFontForContentSizeCategory = YES;
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:label];
+    [row addSubview:control];
+    [NSLayoutConstraint activateConstraints:@[
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:52],
+        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:16],
+        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [label.trailingAnchor constraintLessThanOrEqualToAnchor:control.leadingAnchor constant:-12],
+        [control.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-16],
+        [control.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [control.topAnchor constraintGreaterThanOrEqualToAnchor:row.topAnchor constant:8],
+        [control.bottomAnchor constraintLessThanOrEqualToAnchor:row.bottomAnchor constant:-8],
+    ]];
+    return row;
+}
+
+- (UIView *)cardWithRows:(NSArray<UIView *> *)rows {
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:rows];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 0;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIView *card = [UIView new];
+    card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+    card.layer.cornerRadius = 14;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    [card addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+    ]];
+    return card;
+}
+
+- (UIView *)separator {
+    UIView *line = [UIView new];
+    line.backgroundColor = UIColor.separatorColor;
+    [line.heightAnchor constraintEqualToConstant:0.5].active = YES;
+    return line;
+}
+
+- (UIButton *)pillButton:(NSString *)title action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *config = [UIButtonConfiguration grayButtonConfiguration];
+    config.title = title;
+    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    config.contentInsets = NSDirectionalEdgeInsetsMake(6, 14, 6, 14);
+    button.configuration = config;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+// Settings that are visible behind the sheet apply immediately and keep it
+// open, so the effect can be judged without reopening. Everything that leaves
+// the grid (picker, share sheet, mode switch) runs after the dismissal.
+- (void)fire:(LGSheetAction)action dismiss:(BOOL)dismiss {
+    void (^handler)(LGSheetAction) = self.handler;
+    if (!dismiss) {
+        if (handler) handler(action);
+        return;
+    }
+    [self dismissViewControllerAnimated:YES completion:^{
+        if (handler) handler(action);
+    }];
+}
+
+- (void)closeTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)columnsChanged:(UISegmentedControl *)control { [self fire:(control.selectedSegmentIndex == 0 ? LGSheetActionColumns4 : LGSheetActionColumns5) dismiss:NO]; }
+- (void)namesChanged:(UISwitch *)control { [self fire:LGSheetActionToggleNames dismiss:NO]; }
+- (void)spacingChanged:(UISegmentedControl *)control { [self fire:LGSheetActionToggleCompact dismiss:NO]; }
+- (void)chooseTapped { [self fire:LGSheetActionChooseBackground dismiss:YES]; }
+- (void)removeTapped { [self fire:LGSheetActionRemoveBackground dismiss:YES]; }
+- (void)exportTapped { [self fire:LGSheetActionExportLog dismiss:YES]; }
+- (void)switchTapped { [self fire:LGSheetActionSwitchMode dismiss:YES]; }
+
 @end
 
 static const void *LGOverlayKey = &LGOverlayKey;

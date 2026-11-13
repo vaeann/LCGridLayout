@@ -29,6 +29,16 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta6 — 单按钮双手势、标题加粗上移、日志行去卡片（2026-11-13）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `switchButton` 取代 `settingsButton` | 悬浮按钮合并：点按 `toggleMode` 切布局，长按 `handleSwitchLongPress:`（0.45s + 轻触感）开设置；图标显示目标模式（网格→`list.bullet`，原生→`square.grid.3x3.fill`） |
+| 同上 | `lgTopInset` | 宿主大标题展开时导航栏高 ~96；减去 52 的文字带，让我们自绘的「App」紧贴按钮行，不再留一段空档 |
+| 同上 | `titleLabel.font` | `preferredFontForTextStyle` 不保证粗体，改为 `systemFontOfSize:34 weight:bold` 再经 `UIFontMetrics` 缩放 |
+| 同上 | `LGSheetController` | 「导出调试日志」从卡片里拿出来，直接放底色上（16pt 缩进、52pt 高） |
+| `VERSION` | | 不变（0.0.1，beta 序号 +1） |
+
 ## 0.0.1 beta5 — 顶部对齐原生：App 大标题 + 下拉搜索（2026-11-13）
 
 需求：宫格页除了内容区以外，视觉要与原生一致——顶部有「App」大标题，搜索栏平时藏着、下拉才出来。

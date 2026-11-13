@@ -112,7 +112,8 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 排序 | `saveOrder` / `moveItemAtIndexPath` | 存 folder 名数组；宿主已选 custom 时同步镜像 |
 | 解锁 | `footerTapped` / `setHiddenUnlocked` | 三击 → `LAContext` 认证 |
 | 设置 | `showSettings` + `LGSheetController` | 卡片式 sheet（medium/large detent）：分段控件管列数与间距，开关管名称，按钮管背景与日志 |
-| 设置入口 | `showSettings` / `LGSheetController` | 右下角唯一悬浮按钮（齿轮）→ 分组卡片面板；`nativeMode=YES` 时只渲染「切换到宫格布局」+ 取消 |
+| 悬浮按钮 | `switchButton` / `toggleMode` / `handleSwitchLongPress:` | 点按切布局（图标＝目标模式），长按 0.45s 开设置；`lgUpdateSwitchButton` 在 `applyMode` 里刷新图标 |
+| 设置入口 | `showSettings` / `LGSheetController` | 长按悬浮按钮 → 分组卡片面板；`nativeMode=YES` 时只渲染「切换到宫格布局」+ 取消 |
 | 布局切换 | `handleSheetAction:` 的 `SwitchMode` / `SwitchToGrid` | 从面板底部按钮触发，不再有独立的悬浮切换按钮。**不要试图改宿主 navigationItem——SwiftUI 自绘，塞进去不显示** |
 | 图标 | `LGFastIcon` / `requestIconForEntry:` / `lgShowIcon:animated:` | 先给 bundle 里的 PNG，再淡入宿主渲染的图标；`prefetchIcons` 在 refresh 后预取，占位是中性色块而不是 `app.fill` |
 | 启动 | `didSelectItemAtIndexPath:` → `lgLaunchEntry:` | `bundle-name` + `container-folder-name`（`LCDataUUID`，缺失时用 `LCContainers` 唯一项）。优先 `LCSharedUtils.launchToGuestAppWithURL:`，openURL 兜底；`lgContainerExists:` 先查容器目录，不存在就明说 |
@@ -249,7 +250,7 @@ panel       = view.bounds                    ← 铺满，盖住标签栏毛玻�
 
 | 手段 | 怎么做 |
 |---|---|
-| 插件日志 | `Library/Logs/LCGridLayout.log`，或在「齿轮 → 导出调试日志」 |
+| 插件日志 | `Library/Logs/LCGridLayout.log`，或在「长按悬浮按钮 → 导出调试日志」 |
 | 确认加载 | 日志第一行必须是 `Host gate passed: LiveContainer <版本> ...; LCGridLayout_vNN.dylib loaded` |
 | 确认挂载 | 必须有 `Mounted on native app-list hosting controller after N ms`；只有第一行不算成功 |
 | 没挂上 | 等 6 秒，日志会附 view hierarchy dump，改 `LGFindList` 前先看它 |

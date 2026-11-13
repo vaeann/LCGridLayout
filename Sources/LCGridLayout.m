@@ -425,9 +425,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // parking an always-visible field above the icons.
 @property(nonatomic) BOOL searchRevealed;
 @property(nonatomic) CFTimeInterval searchToggleTime;
-// Single floating entry point: the settings gear. The layout switch lives inside
-// the sheet now, so only one button floats over the content.
-@property(nonatomic, strong) UIButton *settingsButton;
+// Single floating entry point. Tap toggles grid / native list, long press opens the
+// settings sheet — one control, two gestures, both modes.
+@property(nonatomic, strong) UIButton *switchButton;
 @property(nonatomic, strong) UILabel *empty;
 @property(nonatomic, strong) NSArray<LGEntry *> *entries;
 @property(nonatomic, strong) NSArray<LGEntry *> *filtered;
@@ -473,6 +473,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
 - (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe;
 - (void)setSearchRevealed:(BOOL)revealed animated:(BOOL)animated;
+- (void)lgUpdateSwitchButton;
+- (void)toggleMode;
+- (void)handleSwitchLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)lgFreezeHostContent:(BOOL)freeze;
 - (void)refresh;
 @end
@@ -508,7 +511,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self.panel addSubview:self.dimView];
     self.titleLabel = [UILabel new];
     self.titleLabel.text = @"App";
-    self.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleLargeTitle];
+    // Explicit bold: preferredFontForTextStyle does not guarantee the nav-bar weight.
+    UIFont *titleBase = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
+    self.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleLargeTitle] scaledFontForFont:titleBase];
     self.titleLabel.adjustsFontForContentSizeCategory = YES;
     self.titleLabel.textColor = UIColor.labelColor;
     [self.panel addSubview:self.titleLabel];
@@ -540,15 +545,18 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.empty.textAlignment = NSTextAlignmentCenter;
     self.collection.backgroundView = self.empty;
     [self.panel addSubview:self.collection];
-    // A single floating button: settings. Layout switching lives in the sheet.
-    UIButtonConfiguration *gearConfig = [UIButtonConfiguration filledButtonConfiguration];
-    gearConfig.image = [UIImage systemImageNamed:@"gearshape.fill"];
-    gearConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-    self.settingsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.settingsButton.configuration = gearConfig;
-    self.settingsButton.accessibilityLabel = @"网格设置";
-    [self.settingsButton addTarget:self action:@selector(showSettings) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.settingsButton];
+    // One floating button: tap switches layout, long press opens settings. The icon
+    // shows the *target* mode, so it reads as "go there".
+    UIButtonConfiguration *switchConfig = [UIButtonConfiguration filledButtonConfiguration];
+    switchConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    self.switchButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.switchButton.configuration = switchConfig;
+    [self.switchButton addTarget:self action:@selector(toggleMode) forControlEvents:UIControlEventTouchUpInside];
+    UILongPressGestureRecognizer *switchPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleSwitchLongPress:)];
+    switchPress.minimumPressDuration = 0.45;
+    [self.switchButton addGestureRecognizer:switchPress];
+    [self.view addSubview:self.switchButton];
+    [self lgUpdateSwitchButton];
     self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
     self.longPress.minimumPressDuration = 0.3;
     [self.collection addGestureRecognizer:self.longPress];
@@ -573,12 +581,16 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self refresh];
 }
 - (CGFloat)lgTopInset {
-    // Sit right below the navigation bar instead of trusting safeAreaInsets, which
-    // can include the large-title area and leaves a visible gap.
+    // The host bar is ~52pt taller while its large title is expanded. We draw the
+    // title ourselves, so keeping the whole bar height would leave that space empty
+    // above our own "App" and double the gap.
     UINavigationController *nav = self.navigationController;
     if (nav && !nav.navigationBarHidden && nav.navigationBar) {
         CGRect bar = [nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.view];
-        return MAX(0, CGRectGetMaxY(bar));
+        CGFloat height = CGRectGetHeight(bar);
+        CGFloat bottom = CGRectGetMaxY(bar);
+        if (height > 60) bottom -= 52;   // drop the large-title band
+        return MAX(0, bottom);
     }
     return self.view.safeAreaInsets.top;
 }
@@ -651,7 +663,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         if (!CGRectIsEmpty(tabFrame)) bottomLimit = MIN(bottomLimit, CGRectGetMinY(tabFrame));
     }
     CGFloat buttonHeight = 44, settingsWidth = 44;
-    self.settingsButton.frame = CGRectMake(MAX(8, w - 16 - settingsWidth), MAX(0, bottomLimit - buttonHeight - 14), settingsWidth, buttonHeight);
+    self.switchButton.frame = CGRectMake(MAX(8, w - 16 - settingsWidth), MAX(0, bottomLimit - buttonHeight - 14), settingsWidth, buttonHeight);
     if (!self.nativeMode) [self lgEnsureNavGuard];
     [self lgFreezeHostContent:!self.nativeMode];
 }
@@ -713,8 +725,26 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     }
 }
 
+- (void)lgUpdateSwitchButton {
+    BOOL toNative = !self.nativeMode;
+    UIButtonConfiguration *config = self.switchButton.configuration;
+    config.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.3x3.fill")];
+    self.switchButton.configuration = config;   // struct: reassign to apply
+    self.switchButton.accessibilityLabel = toNative ? @"切换到列表布局" : @"切换到宫格布局";
+    self.switchButton.accessibilityHint = @"长按打开网格设置";
+}
+- (void)toggleMode {
+    if (self.nativeMode) [self showGrid]; else [self showNative];
+}
+- (void)handleSwitchLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    [self showSettings];
+}
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
+    [self lgUpdateSwitchButton];
     [self lgSuppressNativeSearch:!self.nativeMode];
     [self lgFreezeHostContent:!self.nativeMode];
     if (self.nativeMode && self.navTapGuard) {
@@ -997,8 +1027,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         return;
     }
     UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
-    share.popoverPresentationController.sourceView = self.settingsButton;
-    share.popoverPresentationController.sourceRect = self.settingsButton.bounds;
+    share.popoverPresentationController.sourceView = self.switchButton;
+    share.popoverPresentationController.sourceRect = self.switchButton.bounds;
     [self presentViewController:share animated:YES completion:nil];
 }
 
@@ -1739,14 +1769,24 @@ __attribute__((constructor)) static void LGInitialize(void) {
     [root addArrangedSubview:[self cardWithRows:backgroundRows]];
     [root setCustomSpacing:6 afterView:root.arrangedSubviews.lastObject];
 
+    // Plain row on the sheet background: no card, no separator, no shadow. It reads as
+    // a secondary action, which is what it is.
     UIButton *log = [UIButton buttonWithType:UIButtonTypeSystem];
     [log setTitle:@"导出调试日志" forState:UIControlStateNormal];
     log.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     log.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     [log addTarget:self action:@selector(exportTapped) forControlEvents:UIControlEventTouchUpInside];
-    [log.heightAnchor constraintEqualToConstant:52].active = YES;
-    [root addArrangedSubview:[self cardWithRows:@[log]]];
-    [root setCustomSpacing:20 afterView:root.arrangedSubviews.lastObject];
+    UIView *logRow = [UIView new];
+    log.translatesAutoresizingMaskIntoConstraints = NO;
+    [logRow addSubview:log];
+    [NSLayoutConstraint activateConstraints:@[
+        [logRow.heightAnchor constraintEqualToConstant:52],
+        [log.leadingAnchor constraintEqualToAnchor:logRow.leadingAnchor constant:16],
+        [log.trailingAnchor constraintEqualToAnchor:logRow.trailingAnchor],
+        [log.centerYAnchor constraintEqualToAnchor:logRow.centerYAnchor],
+    ]];
+    [root addArrangedSubview:logRow];
+    [root setCustomSpacing:20 afterView:logRow];
 
     UIButton *switchMode = [UIButton buttonWithType:UIButtonTypeSystem];
     UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];

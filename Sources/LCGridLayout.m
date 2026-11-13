@@ -1042,15 +1042,18 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         }
         case LGSheetActionChooseBackground:
         case LGSheetActionRemoveBackground:
-        case LGSheetActionExportLog:
+        case LGSheetActionExportLog: {
             // The sheet is dismissing; give UIKit a beat before presenting the
-            // picker or the share sheet on top of it.
+            // picker or the share sheet on top of it. The braces are required:
+            // a block literal inside a case would otherwise be skipped by the
+            // jumps to later case labels (error: cannot jump to this case label).
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (action == LGSheetActionChooseBackground) [self chooseBackground];
                 else if (action == LGSheetActionRemoveBackground) [self removeBackground];
                 else [self exportLog];
             });
             break;
+        }
         case LGSheetActionSwitchMode:
             [self showNative];
             break;

@@ -29,6 +29,17 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta18 — 标题落回 119.333、回收旧覆盖层（2026-11-13）
+
+beta17 日志：`title={{20, 118.333}, {390, 37}}` vs `nativeTitle={{20, 119.333}, {59.67, 37}}`
+——字号与行高已一致，只差 1pt。同一份日志里还有几十条重复的 `Layout` 行，暴露出泄漏。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgLayoutContentWithWidth` | 标题纵向 `top + 12` → **`top + 13`** |
+| 同上 | 新增 `LGDetachOverlay` | 被替换的旧覆盖层原来只清关联对象，宿主仍 retain 它作为子控制器，每次 SwiftUI 重建就多一个实例继续布局、继续写 `Layout` 日志。现在 `willMoveToParentViewController:nil` → `removeFromSuperview` → `removeFromParentViewController` → 移出 `LGOverlays` |
+| 同上 | `LGMountOverlay` / `LGTick` | 两个丢弃点都改走 `LGDetachOverlay` |
+
 ## 0.0.1 beta17 — 标题回拉 1pt、日志每次启动清空（2026-11-13）
 
 | 文件 | 位置 | 改动 |

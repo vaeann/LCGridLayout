@@ -978,8 +978,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         self.titleLabel.font = self.cachedNativeTitleFont;
     }
     CGFloat titleHeight = ceil(self.titleLabel.font.lineHeight);
-    // +12: +13 was 2pt too low and +11 1pt too high with the host's own font.
-    CGFloat contentTop = top + 12 + titleHeight + 6;
+    // +13 puts the title exactly on the host's 119.333; with the host's font copied
+    // over, the old "2pt too low" reading no longer applies.
+    CGFloat contentTop = top + 13 + titleHeight + 6;
     self.search.hidden = !self.searchRevealed;
     // The host list keeps everything on one 16pt vertical line: large title, search
     // field and row content all start there. UISearchBar adds its own inset inside
@@ -999,7 +1000,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         CGFloat hostX = CGRectGetMinX(hostTitle);
         if (hostX > 4 && hostX < 60) inset = hostX;
     }
-    self.titleLabel.frame = CGRectMake(inset, top + 12, MAX(0, w - inset * 2), titleHeight);
+    self.titleLabel.frame = CGRectMake(inset, top + 13, MAX(0, w - inset * 2), titleHeight);
     CGFloat headerHeight = self.searchRevealed ? 48 : 0;
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
@@ -2199,6 +2200,17 @@ static UIViewController *LGFindList(UIViewController *vc) {
 // layout callback would recurse.
 static BOOL LGForcingLayout = NO;
 
+// A replaced overlay used to be dropped by clearing the association only. The host
+// still retained it as a child view controller, so every SwiftUI rebuild left another
+// live grid laying itself out (and logging) behind the current one. Detach it fully.
+static void LGDetachOverlay(LGGridController *grid) {
+    if (!grid) return;
+    [grid willMoveToParentViewController:nil];
+    [grid.view removeFromSuperview];
+    [grid removeFromParentViewController];
+    [LGOverlays removeObject:grid];
+}
+
 // Mounting is shared by the polling tick and by the UIKit appearance hooks. The
 // hooks are the ones that matter on cold start: they run before the host page is
 // composited, so the grid is already in place for the very first frame.
@@ -2206,7 +2218,10 @@ static LGGridController *LGMountOverlay(UIViewController *host) {
     if (!host || !host.view) return nil;
     LGGridController *grid = objc_getAssociatedObject(host, LGOverlayKey);
     if (grid && grid.view.superview == host.view) return grid;
-    if (grid) objc_setAssociatedObject(host, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (grid) {
+        LGDetachOverlay(grid);
+        objc_setAssociatedObject(host, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     grid = [LGGridController new];
     [host addChildViewController:grid];
     grid.view.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2324,6 +2339,7 @@ static void LGTick(void) {
             if (grid && grid.view.superview != host.view) {
                 // SwiftUI rebuilt the page view under us; drop the stale overlay so
                 // it is mounted fresh below instead of silently doing nothing.
+                LGDetachOverlay(grid);
                 objc_setAssociatedObject(host, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 grid = nil;
             }

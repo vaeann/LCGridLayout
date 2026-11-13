@@ -105,6 +105,7 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
+- **0.0.1 beta18**：标题纵向 +12 → **+13**（与原生 119.333 完全重合）；修复旧宫格控制器未释放——每次 SwiftUI 重建都会多一个实例继续布局并刷日志，现在丢弃时完整 `detach`
 - **0.0.1 beta17**：标题纵向 +11 → **+12**（回拉 1pt，和原生视觉齐平）；日志改为**每次启动清空**，只保留当前会话，导出不再夹带历史版本
 - **0.0.1 beta16**：标题字体改为**直接拷贝宿主大标题的 font 对象**（字号/字重/行高完全一致，行高 39 → 37）；标题纵向下移量 +13 → **+11**（上次多拉了 2pt）
 - **0.0.1 beta15**：字号回退 34pt（beta14 误改为 31，那个 31pt 读数来自导航栏里一个 6.67pt 宽的子 label）；纵向保持 +13（日志实测 y=119.333 与原生相等）；切回 App 页不再闪——挂 `SwiftUI.UIKitTabBarController` 的 `setSelectedIndex:` / `setSelectedViewController:`，在切换的同一 runloop 内刷新可见性

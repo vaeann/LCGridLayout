@@ -29,6 +29,19 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta8 — 顶部锚点改用按钮行（2026-11-13）
+
+beta7 扫描 `UINavigationBar` 子视图找「高度 38–52 的一行」，在 iOS 26 的新层级里没命中，
+退回旧估算，于是「原生搜索展开后切宫格」仍留一条空白。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgTopInset` / `lgNavButtonBottomInBar:` | 改为在导航栏里遍历所有 `UIControl`（排除类名含 Search 的），取**最小 maxY**＝按钮行底边，+4 作为标题起点。按钮行不随大标题、搜索展开移动 |
+| 同上 | 兜底 | 扫不到时用 `窗口 safeArea.top + 44`（iPad 50） |
+| 同上 | `lgAdoptHostDoubleTaps:` | 已接管的手势记进弱集合，不重复 `requireGestureRecognizerToFail:`；日志每会话一条 |
+| 同上 | `LGTick` / `refresh` | `wasAway` 抖动不再每次触发重扫（离开 >0.4s 才刷）；`Loaded N app(s)` 仅在数量变化时记录 |
+| `VERSION` | | 不变（0.0.1） |
+
 ## 0.0.1 beta7 — 顶部锚点改按钮行、运行状态角标（2026-11-13）
 
 | 文件 | 位置 | 改动 |

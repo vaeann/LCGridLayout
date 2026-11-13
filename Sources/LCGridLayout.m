@@ -541,6 +541,11 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) BOOL searchRevealed;
 @property(nonatomic) CFTimeInterval searchToggleTime;
 @property(nonatomic) CFTimeInterval lastRunningCheck;
+// Host recognizers we already made wait for the nav guard. Without this the 0.5s
+// rescan re-applied requireGestureRecognizerToFail: to the same objects and logged
+// once per scan, which is what flooded the device log.
+@property(nonatomic, strong) NSHashTable<UIGestureRecognizer *> *adoptedGestures;
+@property(nonatomic) BOOL loggedNavAdoption;
 // Single floating entry point. Tap toggles grid / native list, long press opens the
 // settings sheet — one control, two gestures, both modes.
 @property(nonatomic, strong) UIButton *switchButton;
@@ -550,6 +555,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic, strong) NSCache<NSString *, UIImage *> *icons;
 @property(nonatomic) BOOL nativeMode;
 @property(nonatomic) BOOL wasAway;
+@property(nonatomic) CFTimeInterval awaySince;
+@property(nonatomic) NSUInteger lastLoggedCount;
 @property(nonatomic) BOOL hiddenUnlocked;
 @property(nonatomic) BOOL draggingCell;
 @property(nonatomic) BOOL moved;
@@ -587,6 +594,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgLaunchEntry:(LGEntry *)entry;
 - (void)lgCollapseHostSearchIfNeeded;
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
+- (CGFloat)lgNavButtonBottomInBar:(UIView *)bar;
 - (void)lgRefreshRunningBadges;
 - (void)lgCloseEntry:(LGEntry *)entry;
 - (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe;
@@ -609,6 +617,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.hostDisabledViews = [NSHashTable weakObjectsHashTable];
     self.hostDisabledGestures = [NSHashTable weakObjectsHashTable];
     self.hostFrozenScrollViews = [NSHashTable weakObjectsHashTable];
+    self.adoptedGestures = [NSHashTable weakObjectsHashTable];
     self.entries = @[];
     self.filtered = @[];
     self.panel = [UIView new];
@@ -700,41 +709,49 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self refresh];
 }
 - (CGFloat)lgTopInset {
-    // Anchor to the *button row*, not to the whole bar: with a large title the bar is
-    // ~52pt taller, and with the search field expanded it grows again. Subtracting a
-    // fixed 52 only handled the first case, which is why switching over from a list
-    // that had its search open left a blank band.
+    // Anchor on the bar's *buttons*, not on the bar's height. The bar grows by ~52pt
+    // for the large title and again by ~52pt when the search field is revealed; both
+    // of those are counted from the same button row, which never moves. Anything
+    // derived from the total height therefore needs to know which state it is in.
     UINavigationController *nav = self.navigationController;
     if (nav && !nav.navigationBarHidden && nav.navigationBar) {
-        UIView *bar = nav.navigationBar;
-        CGRect barFrame = [bar convertRect:bar.bounds toView:self.view];
-        CGFloat barWidth = CGRectGetWidth(barFrame);
-        CGFloat rowBottom = CGFLOAT_MAX;
-        for (UIView *sub in bar.subviews) {
-            if (sub.hidden || sub.alpha < 0.01) continue;
-            CGRect frame = [sub convertRect:sub.bounds toView:self.view];
-            CGFloat height = CGRectGetHeight(frame);
-            // The content row is 44pt (50 on iPad); title and search bands are taller
-            // but sit below it, so the smallest qualifying bottom is the row we want.
-            if (height < 38 || height > 52) continue;
-            if (CGRectGetWidth(frame) < barWidth * 0.7) continue;
-            rowBottom = MIN(rowBottom, CGRectGetMaxY(frame));
-        }
-        if (rowBottom < CGFLOAT_MAX) {
-            static BOOL loggedBarGeometry = NO;
-            if (!loggedBarGeometry) {
-                loggedBarGeometry = YES;
-                LGLog([NSString stringWithFormat:@"Nav bar height=%.0f rowBottom=%.0f fullBottom=%.0f",
-                       CGRectGetHeight(barFrame), rowBottom, CGRectGetMaxY(barFrame)]);
-            }
-            return MAX(0, rowBottom);
-        }
-        // Layout unknown: fall back to the old estimate.
-        CGFloat bottom = CGRectGetMaxY(barFrame);
-        if (CGRectGetHeight(barFrame) > 60) bottom -= 52;
-        return MAX(0, bottom);
+        CGFloat bottom = [self lgNavButtonBottomInBar:nav.navigationBar];
+        if (bottom > 0) return bottom + 4;   // small gap under the buttons
+        CGFloat status = self.view.window.safeAreaInsets.top;
+        if (status <= 0) status = self.view.safeAreaInsets.top;
+        CGFloat row = (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) ? 50 : 44;
+        return status + row;
     }
     return self.view.safeAreaInsets.top;
+}
+
+// Bottom of the lowest *non-search* control inside the navigation bar. Buttons live in
+// the bar's content row and are the one thing that stays put across large-title and
+// search-expanded states.
+- (CGFloat)lgNavButtonBottomInBar:(UIView *)bar {
+    CGFloat best = CGFLOAT_MAX;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:bar];
+    NSUInteger visited = 0;
+    while (queue.count > 0 && visited < 300) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        visited++;
+        NSString *name = NSStringFromClass(view.class);
+        BOOL isSearch = [name rangeOfString:@"Search" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        if (!isSearch && [view isKindOfClass:UIControl.class]) {
+            CGRect frame = [view convertRect:view.bounds toView:self.view];
+            if (CGRectGetHeight(frame) > 8) best = MIN(best, CGRectGetMaxY(frame));
+        }
+        if (view.subviews.count > 0 && visited < 300) [queue addObjectsFromArray:view.subviews];
+    }
+    if (best == CGFLOAT_MAX) return 0;
+    static BOOL logged = NO;
+    if (!logged) {
+        logged = YES;
+        LGLog([NSString stringWithFormat:@"Nav anchor: buttonsBottom=%.0f barHeight=%.0f",
+               best, CGRectGetHeight([bar convertRect:bar.bounds toView:self.view])]);
+    }
+    return best;
 }
 // Navigation bar large-title collapse changes geometry without changing our
 // bounds, so viewDidLayoutSubviews never fires and the header keeps its old
@@ -909,9 +926,15 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self filter];
     [self.collection.refreshControl endRefreshing];
     [self prefetchIcons];
-    LGLog([NSString stringWithFormat:@"Loaded %lu app(s); skipped hidden=%lu ambiguous=%lu damaged=%lu",
-           (unsigned long)self.entries.count, (unsigned long)LGCountHidden,
-           (unsigned long)LGCountAmbiguous, (unsigned long)LGCountDamaged]);
+    // Log on change only: a rescan runs on every tab return and the line was printed
+    // dozens of times a minute, burying anything useful.
+    NSUInteger total = self.entries.count + LGCountHidden + LGCountAmbiguous + LGCountDamaged;
+    if (total != self.lastLoggedCount) {
+        self.lastLoggedCount = total;
+        LGLog([NSString stringWithFormat:@"Loaded %lu app(s); skipped hidden=%lu ambiguous=%lu damaged=%lu",
+               (unsigned long)self.entries.count, (unsigned long)LGCountHidden,
+               (unsigned long)LGCountAmbiguous, (unsigned long)LGCountDamaged]);
+    }
 }
 // Generate themed icons for everything currently listed, one per run-loop turn.
 // Without this each cell had to wait for the generator on first display, which is
@@ -1527,12 +1550,19 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
             if (gesture == self.navTapGuard) continue;
             if (![gesture isKindOfClass:UITapGestureRecognizer.class]) continue;
             if (((UITapGestureRecognizer *)gesture).numberOfTapsRequired < 2) continue;
+            if ([self.adoptedGestures containsObject:gesture]) continue;
             @try { [gesture requireGestureRecognizerToFail:self.navTapGuard]; } @catch (__unused NSException *e) { continue; }
+            [self.adoptedGestures addObject:gesture];
             adopted++;
         }
         [stack addObjectsFromArray:view.subviews];
     }
-    if (adopted > 0) LGLog([NSString stringWithFormat:@"Nav guard adopted %lu host double tap(s)", (unsigned long)adopted]);
+    // Only new adoptions are worth a line, and only once per session: the rescan runs
+    // twice a second and used to print forever.
+    if (adopted > 0 && !self.loggedNavAdoption) {
+        self.loggedNavAdoption = YES;
+        LGLog([NSString stringWithFormat:@"Nav guard adopted %lu host double tap(s)", (unsigned long)adopted]);
+    }
 }
 
 // The expanded-search state is not a navigation-bar gesture: LiveContainer's own
@@ -1817,11 +1847,16 @@ static void LGTick(void) {
         if ([active containsObject:grid]) {
             if (grid.wasAway) {
                 grid.wasAway = NO;
-                [grid refresh];
+                // One missed tick is normal while SwiftUI swaps its hierarchy; only a
+                // real absence is worth a rescan. Without this guard the list reloaded
+                // and logged "Loaded N app(s)" several times a second.
+                if (grid.awaySince > 0 && CFAbsoluteTimeGetCurrent() - grid.awaySince > 0.4) [grid refresh];
+                grid.awaySince = 0;
             }
             [grid lgSyncLayout];
-        } else {
+        } else if (!grid.wasAway) {
             grid.wasAway = YES;
+            grid.awaySince = CFAbsoluteTimeGetCurrent();
         }
     }
     static CFTimeInterval idleSince = 0;

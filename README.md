@@ -55,8 +55,8 @@
 ## 技术说明
 
 - **挂载方式**：在宿主的“我的应用”页上 `addChildViewController` 叠一层铺满宿主视图的覆盖层（`hitTest` 穿透），内容按安全区排版；标签栏毛玻璃下方也由覆盖层挡住。
-- **不 hook**：不 swizzle 任何方法，不抢 key window，不挂手势，因此能和 LCFloatingMenu 这类插件共存。
-- **发现宿主**：启动后前 1.2 秒按 30ms、之后按 0.1 秒轮询；启动动画期间（前台非活跃）就开始挂载，导航标题还没写入时也接受宿主页。
+- **最小侵入**：只交换 `UIViewController` 的 `viewWillAppear:` / `viewDidLayoutSubviews` 两个外观回调用于提前挂载；不抢 key window、不改宿主的任何方法实现，因此能和 LCFloatingMenu 这类插件共存（这是对上游「完全不 hook」原则的刻意偏离，仅限这两个回调）。
+- **发现宿主**：外观回调在首帧合成前挂载覆盖层，冷启动实测 0–3 ms；0.1s 轮询保留为兜底（SwiftUI 重建页面、页面不经 `viewWillAppear:` 的情况）。
 - **图标**：首帧直接读 `.app` 内的 `AppIcon*.png`，之后用宿主自己的 `generateIconForBundleURL:style:hasBorder:` 逐个替换为主题图标，不阻塞主线程。
 - **日志**：`Library/Logs/LCGridLayout.log`，上限 128 KB，超出重写；设置里可一键导出。
 
@@ -105,6 +105,7 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
+- **0.0.1 beta11**：冷启动不再闪原生列表——改用 `viewWillAppear:` / `viewDidLayoutSubviews` 外观回调提前挂载，挂载后同步 `layoutIfNeeded`，首帧即宫格；0.1s 轮询降级为兜底
 - **0.0.1 beta10**：按原生截图对齐间距——标题与按钮行 20pt、搜索栏与首行 24pt
 - **0.0.1 beta9**：关掉 scroll view 的自动安全区补偿（标题与首行之间那 52pt），首行间距收紧到原生水平
 - **0.0.1 beta8**：顶部锚点改为「导航栏按钮行的底边」，大标题/搜索展开都不再留白；同时抑制 `Nav guard adopted`、`Loaded N app(s)` 的日志刷屏

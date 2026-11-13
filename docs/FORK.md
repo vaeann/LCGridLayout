@@ -29,6 +29,27 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta11 — 冷启动不再闪原生列表（2026-11-13）
+
+现象：宫格模式持久化后，冷启动仍会看到一帧原生列表再变宫格。日志显示挂载发生在
+13–30 ms，所以不是"来晚了"，而是挂上之后那一帧面板还没有 frame——`panel.frame` 只在
+`viewDidLayoutSubviews` 里设置，挂载发生在定时器回调里，这一帧整层透明，于是透出
+下面的原生列表。
+
+上游原则是"不 hook 任何方法"。本版按需求改为**只交换两个 UIKit 外观回调**，其余不变。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `LGMountOverlay` | 新增。tick 与外观回调共用的幂等挂载；挂载后同步 `layoutIfNeeded`（`LGForcingLayout` 防在 layout 回调里递归） |
+| 同上 | `LGIsAppListHost` | 新增。`*HostingController` + 导航栈只有 1 页 + 当前选中 tab 分支 + 标题匹配；**不要求 `view.window`**（回调时页面可能还没进 window） |
+| 同上 | `UIViewController (LCGridEarlyMount)` | 新增。`method_exchangeImplementations` 交换 `viewWillAppear:` / `viewDidLayoutSubviews`，命中即挂载 |
+| 同上 | `LGTitle` | `dispatch_once` 缓存（现在处在每次布局都会走的高频路径上） |
+| 同上 | `LGMountOverlay` | 首次扫描结果为空时，0.35s 后补一次 `refresh`（回调节点可能早于 LC 读完应用列表） |
+| 同上 | `LGInitialize` | `LGOverlays` / `LGStartTime` / 默认值 / hook 安装改为 constructor 内同步执行 |
+
+刻意**没有**改的：`LGGridController.view.backgroundColor` 保持 `clear`。原生列表模式靠
+`panel.hidden` + 这一层透明露出原生列表，改成不透明底色会把原生列表整页盖死。
+
 ## 0.0.1 beta10 — 间距对齐原生（2026-11-13）
 
 对照原生/宫格截图测量：按钮行底边到「App」顶边，原生 ~22pt，宫格 ~12pt；搜索栏到首行
@@ -127,7 +148,7 @@ beta7 扫描 `UINavigationBar` 子视图找「高度 38–52 的一行」，在 
 | 同上 | `lgLaunchEntry:` | 优先调用 `LCSharedUtils.launchToGuestAppWithURL:`（进程内，和微珠一致），失败再走 `UIApplication openURL:` |
 | 同上 | `lgContainerExists:` + 启动前检查 | 数据目录 `Documents/Data/Application/<uuid>`（及 group 侧）不存在时，弹窗说明「容器不存在」，可点「仍然尝试」。LC 原生列表对这类 app 同样失败，错误文案是裸文件名 |
 | 同上 | `LGReadApps` | 没有 `LCDataUUID` 时，从 `LCContainers` 推断（仅当只有一个容器） |
-| 同上 | `LGInitialize` | 启动探针 30ms → 16ms，窗口 1.2s → 1.6s。原生列表闪一下是挂载时机，不是注入失败；不 hook `viewDidAppear` 就只能缩短，不能消除 |
+| 同上 | `LGInitialize` | 启动探针 30ms → 16ms，窗口 1.2s → 1.6s。原生列表闪一下是挂载时机，不是注入失败。beta11 起改由外观回调（`viewWillAppear:` / `viewDidLayoutSubviews`）在首帧前挂载，轮询降级为兜底 |
 | `VERSION` | | 不变（仍 0.0.1，beta 序号自动 +1） |
 
 ## 0.0.1 beta2 — 单按钮、图标与启动修复、搜索压制（2026-11-13）

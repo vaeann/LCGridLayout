@@ -7,10 +7,11 @@
 
 ## 0. 一句话架构
 
-插件被 LiveContainer 宿主 dlopen 后，用 `NSTimer` 轮询找"我的应用"那个页面，
-`addChildViewController` 挂一层**铺满宿主视图**的覆盖层（`hitTest` 穿透），
-覆盖层自己画网格、读文件系统拿应用列表、调宿主的图标接口补图标。
-**不 swizzle、不抢 key window、不改 IPA。**
+插件被 LiveContainer 宿主 dlopen 后，交换 `UIViewController` 的 `viewWillAppear:` /
+`viewDidLayoutSubviews` 两个外观回调，在首帧合成前
+`addChildViewController` 挂一层**铺满宿主视图**的覆盖层（`hitTest` 穿透）；
+0.1s 轮询只作兜底。覆盖层自己画网格、读文件系统拿应用列表、调宿主的图标接口补图标。
+**不抢 key window、不改宿主方法实现、不改 IPA。**
 
 ---
 
@@ -71,8 +72,10 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 3. 没挂过就 `addChildViewController` + 4 条边约束铺满；挂过就 `bringSubviewToFront`
 4. 页面重新出现（`wasAway`）时 `refresh()` 重读应用列表
 
-> 为什么用轮询而不是 hook：上游明确"不 hook 任何方法"才能和 LCFloatingMenu 共存。
-> 轮询的代价是时序问题，所以有 30ms 的启动 burst——把"原生列表闪一帧"压到一个帧周期。
+> 为什么还要轮询：外观回调能覆盖冷启动和 tab 切换，但 SwiftUI 重建页面时宿主可能
+> 既不重走 `viewWillAppear:` 也不重走 `viewDidLayoutSubviews`，轮询是兜底。
+> beta11 之前只有轮询，靠 30ms 启动 burst 把"原生列表闪一帧"压到一个帧周期；
+> 现在是外观回调在首帧前挂载，实测 0–3 ms。
 
 **找错页面时的调试**：连续 6 秒没挂上，`LGDumpWindows()` 会把整棵 VC 树（只含类名和标题）
 写进日志。改 `LGFindList` 的判断条件前先看这份 dump。
@@ -235,7 +238,9 @@ panel       = view.bounds                    ← 铺满，盖住标签栏毛玻�
 
 ## 9. 硬约束（破坏这些会出事）
 
-1. **不 swizzle、不抢 key window、不挂全局手势。** 这是和 LCFloatingMenu 共存的前提。
+1. **只允许交换 `UIViewController` 的 `viewWillAppear:` / `viewDidLayoutSubviews` 两个外观回调**
+   （用于首帧前挂载）。不抢 key window、不挂全局手势、不改宿主的业务方法——
+   这是和 LCFloatingMenu 共存的前提。
 2. **`LGPassView.hitTest` 必须继续穿透**（返回 nil），否则宿主页面点不动。
 3. **覆盖层必须铺满 `host.view`**，包括标签栏毛玻璃下方；只盖安全区会透出原生行。
 4. **`LGStateFor` 是唯一真源，模糊情况必须 fail-closed。** 宁可少显示一个应用，

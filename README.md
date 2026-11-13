@@ -105,6 +105,7 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
+- **0.0.2 beta3**：①修「把手三种点击只有震动没效果」——`MultitaskDockManager` 是 Swift 类，运行时类名带 `LiveContainerSwiftUI.` 前缀，短名查不到类导致任务列表永远为空，三个动作全部空转（微珠 HostClass 同款双名兜底修复）；②新增**「隐藏自带多任务控件」**（设置面板开关，默认开）——微珠同款手法：hook `showDock`/`showDockFromHidden`/`toggleDockVisibility` 吞掉调用 + tick 扫描兜底藏 dock（类名 HostingView+AnyView 特征识别），hook `updateVerticalConstraints` 后手压制窗口按钮（bar 高度约束压 0、内容贴顶贴底、bar 与小窗把手隐藏）；关开关即时还原（dock 下一 tick、按钮重放 LC 布局）
 - **0.0.2 beta2**：修「把手卡在左上角、无法拖动」——`lgBuildHandle` 创建了把手视图却漏了 `self.handle = handle`，导致定位、拖动、吸附全被 self.handle 的空值守卫挡下；另设置面板日志区改为「导出日志 / 清理日志」两行，清理按钮实时带当前日志大小（如「清理日志 90KB」，四舍五入到 KB，上限 128KB），点击即清空并立即刷新——清空不删文件，导出照常可用，方便反复清理历史日志测试问题
 - **0.0.2 beta1**：新增**悬浮把手**——50pt 圆形玻璃按钮（独立透传 UIWindow，level = Normal+75），常驻可拖动、吸附左右边缘、位置持久化。中心圆点复刻宫格角标的呼吸灯：有在跑的任务绿色呼吸、没有则灰色常亮。动作全部走 **LC 本体接口，零微珠依赖**：单击=回 LC 主界面（minimizeWindow 前台窗口）、双击=切换下一个在跑的 app（只有 1 个则只震动）、长按=关当前 app，主界面时长按弹「即将关闭 x 个App后台」确认后全关；三档触觉反馈（轻/中/重）
 - **0.0.1 正式版**：与 beta22 同一份代码（commit `317d3b3`），经 22 个测试版实机迭代验证——冷启动直入宫格不闪、四个 tab 只在 App 页生效且互不干扰、标题位置字体与原生完全一致、点在跑的应用弹回窗口、多任务启动跟随设置、点正在运行的应用不再闪退

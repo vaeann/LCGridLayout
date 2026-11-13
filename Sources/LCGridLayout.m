@@ -16,6 +16,11 @@ static NSString *const LGCompactTop = @"LCGridLayout.compactTop";
 static NSString *const LGOrder = @"LCGridLayout.order";
 static NSString *const LGTitleX = @"LCGridLayout.titleX";
 static NSString *const LGTitleFont = @"LCGridLayout.titleFont";
+static NSString *const LGHideNative = @"LCGridLayout.hideNativeMultitask";  // YES = 藏 LC 自带 dock 与窗口按钮
+
+// 定义在"隐藏自带多任务控件"模块（LGTick 前）；handleSheetAction 在开关
+// 关掉时调用它重放 LC 的布局以还原窗口按钮。
+static void LGRestoreWindowChrome(void);
 static CFTimeInterval LGStartTime;
 
 static id LGGet(id object, NSString *selector) {
@@ -551,6 +556,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     LGSheetActionChooseBackground,
     LGSheetActionRemoveBackground,
     LGSheetActionExportLog,
+    LGSheetActionToggleHideNative,
     LGSheetActionSwitchMode,
     LGSheetActionSwitchToGrid,
 };
@@ -563,6 +569,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) BOOL showNames;
 @property(nonatomic) BOOL compactTop;
 @property(nonatomic) BOOL hasBackground;
+@property(nonatomic) BOOL hideNative;
 // Native list mode shows a trimmed sheet: grid settings are meaningless while the
 // grid is not on screen, only the switch back matters.
 @property(nonatomic) BOOL nativeMode;
@@ -2212,6 +2219,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     sheet.columns = [NSUserDefaults.standardUserDefaults integerForKey:LGColumns];
     sheet.showNames = [NSUserDefaults.standardUserDefaults boolForKey:LGNames];
     sheet.compactTop = [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop];
+    sheet.hideNative = [NSUserDefaults.standardUserDefaults boolForKey:LGHideNative];
     sheet.hasBackground = self.backgroundView.image != nil;
     __weak typeof(self) weakSelf = self;
     sheet.handler = ^(LGSheetAction action) { [weakSelf handleSheetAction:action]; };
@@ -2246,6 +2254,18 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
             BOOL compact = [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop];
             [NSUserDefaults.standardUserDefaults setBool:!compact forKey:LGCompactTop];
             [self.view setNeedsLayout];
+            break;
+        }
+        case LGSheetActionToggleHideNative: {
+            BOOL hidden = [NSUserDefaults.standardUserDefaults boolForKey:LGHideNative];
+            [NSUserDefaults.standardUserDefaults setBool:!hidden forKey:LGHideNative];
+            LGLog(@"Native multitask chrome hide -> %d", !hidden);
+            if (hidden) {
+                // 关掉：dock 由下一个 tick 还原；窗口按钮立即重放 LC 的布局
+                // 恢复（此时 hook 只调原实现）。开着的方向无需动作：下一个
+                // tick 藏 dock，下一次 LC 布局藏按钮。
+                dispatch_async(dispatch_get_main_queue(), ^{ LGRestoreWindowChrome(); });
+            }
             break;
         }
         case LGSheetActionChooseBackground:
@@ -2648,7 +2668,12 @@ static void LGHaptic(UIImpactFeedbackStyle style) {
 // 沿 responder chain 找到 LC 自己的 DecoratedAppSceneViewController，读公开属性。
 - (NSArray *)lgTaskWindows {
     NSMutableArray *result = [NSMutableArray new];
-    Class dock = NSClassFromString(@"MultitaskDockManager");
+    // MultitaskDockManager 是 Swift 类，运行时名带模块前缀（LCOrbit 的 HostClass
+    // 就是这样双名兜底的）。只查短名时类为 nil，任务列表永远为空——把手三个
+    // 动作因此全部静默无效，而震动照常。DecoratedAppSceneViewController 是
+    // ObjC 类，短名有效，不用兜底。
+    Class dock = NSClassFromString(@"MultitaskDockManager")
+              ?: NSClassFromString(@"LiveContainerSwiftUI.MultitaskDockManager");
     SEL sharedSel = NSSelectorFromString(@"shared");
     SEL hostSel = NSSelectorFromString(@"windowHostingView");
     if (!dock || ![dock respondsToSelector:sharedSel]) return result;
@@ -2841,6 +2866,201 @@ static void LGHaptic(UIImpactFeedbackStyle style) {
 
 @end
 
+#pragma mark - 隐藏 LC 自带多任务控件（dock + 窗口按钮，微珠同款手法）
+
+// 宫格把手接管了多任务操作入口后，LC 自带的 dock 和窗口顶部按钮（最小化/
+// 小窗/关闭）就是重复入口。这里按微珠 LCOrbitMultitaskUI 的思路压掉它们：
+//   dock   = hook showDock/showDockFromHidden/toggleDockVisibility 吞掉调用
+//            + tick 扫描兜底藏视图（Swift 直接 addSubview 的首帧拦不住）
+//   按钮   = hook DecoratedAppSceneViewController 的 updateVerticalConstraints
+//            （LC 所有窗口状态变化的汇聚点：创建/折叠/最大化/PiP 都会调），
+//            调原实现后把 bar 高度压成 0、内容贴顶贴底、bar 与小窗把手隐藏。
+// 开关（LGHideNative，默认开）每次 hook/tick 实时读取：关掉后 dock 由下一
+// 个 tick 还原，窗口按钮由 LC 下一次 updateVerticalConstraints 还原（状态
+// 没变就不触发，此时重启 LiveContainer 即完全还原）。
+
+static void *LGChromeSnapshotKey = &LGChromeSnapshotKey;
+static IMP LGOrigSetupDecoratedView, LGOrigUpdateVertical;
+static IMP LGOrigShowDock, LGOrigShowDockFromHidden, LGOrigToggleDock;
+
+static BOOL LGHideNativeEnabled(void) {
+    return [NSUserDefaults.standardUserDefaults boolForKey:LGHideNative];
+}
+
+// LC 的 dock 是 SwiftUI hosting 视图，showDock 里直接 addSubview 到 keyWindow。
+// 识别特征与微珠 IsNativeDockSurface 一致：类名含 HostingView + AnyView、
+// superview 就是 window、且不是 rootViewController.view —— 任务容器
+// （VirtualWindowsHostView，ObjC 类名）不含这些特征，天然不会误伤。
+static BOOL LGIsNativeDockSurface(UIView *view, UIWindow *window) {
+    if (!view || !window || view.superview != window) return NO;
+    if (view == window.rootViewController.view) return NO;
+    NSString *name = NSStringFromClass(view.class);
+    if (!name) return NO;
+    return [name rangeOfString:@"HostingView"].location != NSNotFound &&
+           [name rangeOfString:@"AnyView"].location != NSNotFound;
+}
+
+// 微珠 ApplyDockSurfaceVisibility 同款：藏之前把原状态记进 associated
+// object，恢复时还原，开关来回切不丢 LC 自己的可见性状态。
+static void LGApplyDockVisibility(UIView *view, BOOL suppress) {
+    if (!view) return;
+    NSArray *saved = objc_getAssociatedObject(view, LGChromeSnapshotKey);
+    if (suppress) {
+        if (!saved) objc_setAssociatedObject(view, LGChromeSnapshotKey,
+            @[@(view.hidden), @(view.userInteractionEnabled)], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        view.hidden = YES;
+        view.userInteractionEnabled = NO;
+    } else if (saved) {
+        view.hidden = [saved[0] boolValue];
+        view.userInteractionEnabled = [saved[1] boolValue];
+        objc_setAssociatedObject(view, LGChromeSnapshotKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static void LGSuppressNativeDockTick(void) {
+    BOOL suppress = LGHideNativeEnabled();
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.windowLevel != UIWindowLevelNormal) continue;
+            for (UIView *view in window.subviews) {
+                if (LGIsNativeDockSurface(view, window)) LGApplyDockVisibility(view, suppress);
+            }
+        }
+    }
+}
+
+// 窗口 chrome：bar + 右下角小窗拖拽把手，连同 LC 的三根纵向约束一起处理。
+// LC 把内容顶边钉在 bar 底部（top + navBarHeight），只 hidden bar 会留一条
+// 44pt 空档，必须 deactivate LC 的约束换成 bar 高度 0、内容贴顶贴底，并把
+// 新约束写回 activatedVerticalConstraints（LC 下次先 deactivate 它 = 我们的，
+// 再激活它的新鲜约束，hook 后手再换 —— 每一轮我们都是最后的赢家）。
+static void LGSuppressWindowChrome(id windowController) {
+    UIViewController *host = windowController;
+    if (!host.isViewLoaded) return;
+    SEL barSel = NSSelectorFromString(@"navigationBar");
+    if (![windowController respondsToSelector:barSel]) return;
+    UINavigationBar *bar = ((UINavigationBar *(*)(id, SEL))objc_msgSend)(windowController, barSel);
+    SEL sceneSel = NSSelectorFromString(@"appSceneVC");
+    if (!bar || ![windowController respondsToSelector:sceneSel]) return;
+    UIViewController *scene = ((id (*)(id, SEL))objc_msgSend)(windowController, sceneSel);
+    if (!scene || !scene.view) return;
+
+    SEL conSel = NSSelectorFromString(@"activatedVerticalConstraints");
+    SEL setConSel = NSSelectorFromString(@"setActivatedVerticalConstraints:");
+    if ([windowController respondsToSelector:conSel] && [windowController respondsToSelector:setConSel]) {
+        NSArray *lcConstraints = ((NSArray *(*)(id, SEL))objc_msgSend)(windowController, conSel);
+        if (lcConstraints.count >= 2) {
+            [NSLayoutConstraint deactivateConstraints:lcConstraints];
+            NSArray *ours = @[
+                [scene.view.topAnchor constraintEqualToAnchor:host.view.topAnchor],
+                [scene.view.bottomAnchor constraintEqualToAnchor:host.view.bottomAnchor],
+                [bar.heightAnchor constraintEqualToConstant:0]
+            ];
+            [NSLayoutConstraint activateConstraints:ours];
+            ((void (*)(id, SEL, id))objc_msgSend)(windowController, setConSel, ours);
+        }
+    }
+    bar.hidden = YES;
+    bar.alpha = 0;
+    SEL handleSel = NSSelectorFromString(@"resizeHandle");
+    if ([windowController respondsToSelector:handleSel]) {
+        UIView *handle = ((UIView *(*)(id, SEL))objc_msgSend)(windowController, handleSel);
+        handle.hidden = YES;
+        handle.alpha = 0;
+    }
+    [host.view layoutIfNeeded];
+}
+
+static void LGDecoratedSetup(id self, SEL _cmd) {
+    ((void (*)(id, SEL))LGOrigSetupDecoratedView)(self, _cmd);
+    if (LGHideNativeEnabled()) LGSuppressWindowChrome(self);
+}
+static void LGDecoratedUpdateVertical(id self, SEL _cmd) {
+    ((void (*)(id, SEL))LGOrigUpdateVertical)(self, _cmd);
+    if (LGHideNativeEnabled()) LGSuppressWindowChrome(self);
+}
+
+// dock 三件套吞掉：任务注册唤出（showDock）、从隐藏态唤出、边缘手势切换，
+// 开关开着时一律不执行原实现；关掉时放行，LC 行为完全还原。
+static void LGDockShowBlocked(id self, SEL _cmd) {
+    if (LGHideNativeEnabled()) return;
+    ((void (*)(id, SEL))LGOrigShowDock)(self, _cmd);
+}
+static void LGDockShowFromHiddenBlocked(id self, SEL _cmd) {
+    if (LGHideNativeEnabled()) return;
+    ((void (*)(id, SEL))LGOrigShowDockFromHidden)(self, _cmd);
+}
+static void LGDockToggleBlocked(id self, SEL _cmd) {
+    if (LGHideNativeEnabled()) return;
+    ((void (*)(id, SEL))LGOrigToggleDock)(self, _cmd);
+}
+
+static IMP LGSwapMethod(Class cls, SEL sel, IMP imp) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) return NULL;
+    IMP original = method_getImplementation(method);
+    method_setImplementation(method, imp);
+    return original;
+}
+
+static void LGInstallNativeHideHooks(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class decorated = NSClassFromString(@"DecoratedAppSceneViewController");
+        SEL setupSel = NSSelectorFromString(@"setupDecoratedView");
+        SEL verticalSel = NSSelectorFromString(@"updateVerticalConstraints");
+        BOOL hookedDecorated = NO;
+        if (decorated && [decorated respondsToSelector:setupSel] && [decorated respondsToSelector:verticalSel]) {
+            LGOrigSetupDecoratedView = LGSwapMethod(decorated, setupSel, (IMP)LGDecoratedSetup);
+            LGOrigUpdateVertical = LGSwapMethod(decorated, verticalSel, (IMP)LGDecoratedUpdateVertical);
+            hookedDecorated = LGOrigSetupDecoratedView && LGOrigUpdateVertical;
+        }
+        Class dock = NSClassFromString(@"MultitaskDockManager")
+                  ?: NSClassFromString(@"LiveContainerSwiftUI.MultitaskDockManager");
+        BOOL hookedDock = NO;
+        if (dock) {
+            SEL showSel = NSSelectorFromString(@"showDock");
+            SEL showHiddenSel = NSSelectorFromString(@"showDockFromHidden");
+            SEL toggleSel = NSSelectorFromString(@"toggleDockVisibility");
+            if ([dock respondsToSelector:showSel] && [dock respondsToSelector:showHiddenSel] && [dock respondsToSelector:toggleSel]) {
+                LGOrigShowDock = LGSwapMethod(dock, showSel, (IMP)LGDockShowBlocked);
+                LGOrigShowDockFromHidden = LGSwapMethod(dock, showHiddenSel, (IMP)LGDockShowFromHiddenBlocked);
+                LGOrigToggleDock = LGSwapMethod(dock, toggleSel, (IMP)LGDockToggleBlocked);
+                hookedDock = LGOrigShowDock && LGOrigShowDockFromHidden && LGOrigToggleDock;
+            }
+        }
+        LGLog([NSString stringWithFormat:@"Native chrome hooks installed: decorated=%d dock=%d",
+              hookedDecorated, hookedDock]);
+    });
+}
+
+// 开关关掉时主动还一次窗口按钮：重放 LC 的 updateVerticalConstraints（此时
+// hook 只调原实现，LC 用自己的约束重建布局，bar/handle 由它自己恢复显示）。
+// 找不到实例就什么都不做 —— 下一次状态变化或重启同样能还原。
+static void LGRestoreWindowChrome(void) {
+    Class decorated = NSClassFromString(@"DecoratedAppSceneViewController");
+    SEL verticalSel = NSSelectorFromString(@"updateVerticalConstraints");
+    if (!decorated) return;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            NSMutableArray<UIViewController *> *queue = [NSMutableArray array];
+            if (window.rootViewController) [queue addObject:window.rootViewController];
+            while (queue.count) {
+                UIViewController *vc = queue.firstObject;
+                [queue removeObjectAtIndex:0];
+                if ([vc isKindOfClass:decorated] && [vc respondsToSelector:verticalSel]) {
+                    ((void (*)(id, SEL))objc_msgSend)(vc, verticalSel);
+                    continue;
+                }
+                [queue addObjectsFromArray:vc.childViewControllers];
+                if (vc.presentedViewController) [queue addObject:vc.presentedViewController];
+            }
+        }
+    }
+}
+
 static void LGTick(void) {
     // The tab bar controller class may not exist yet during the dyld constructor.
     if (!LGTabHookInstalled) LGInstallTabSwitchHook();
@@ -2888,6 +3108,9 @@ static void LGTick(void) {
     }
     // 悬浮把手：常驻，挂在宿主所在的 scene 上，与宫格挂载互相独立。
     [LGHandleController.sharedController lgTickInScene:handleScene];
+    // LC 自带 dock 的兜底压制：hook 拦不住 Swift 直接 addSubview 首显的那一帧
+    // （微珠为此 hook 了 UIWindow didAddSubview:），0.1s 轮询最多晚一帧。
+    LGSuppressNativeDockTick();
     for (LGGridController *grid in LGOverlays) {
         // Independent of `active`: when SwiftUI swaps tab containers the host page can
         // drop out of the window entirely, and this is the only thing that brings the
@@ -2981,9 +3204,12 @@ __attribute__((constructor)) static void LGInitialize(void) {
         // is set up synchronously here rather than on the next main-queue turn.
         LGOverlays = [NSHashTable weakObjectsHashTable];
         LGStartTime = CFAbsoluteTimeGetCurrent();
-        [NSUserDefaults.standardUserDefaults registerDefaults:@{LGColumns:@4, LGNames:@YES, LGNative:@NO, LGCompactTop:@YES}];
+        [NSUserDefaults.standardUserDefaults registerDefaults:@{LGColumns:@4, LGNames:@YES, LGNative:@NO, LGCompactTop:@YES, LGHideNative:@YES}];
         LGInstallAppearanceHooks();
         LGInstallTabSwitchHook();
+        // LC 自带多任务控件的隐藏 hook：Dock/Decorated 都是 LC 主二进制的类，
+        // dyld constructor 时已注册，可以同步装好（微珠同款时机）。
+        LGInstallNativeHideHooks();
         dispatch_async(dispatch_get_main_queue(), ^{
             // Start every launch with a clean log. LGLog appends and only rewrites past
             // 128 KB, so old processes' lines used to pile up and the exported file was
@@ -3086,6 +3312,15 @@ __attribute__((constructor)) static void LGInitialize(void) {
         [self separator],
         [self rowWithTitle:@"顶部间距" control:spacing],
     ]]];
+    [root setCustomSpacing:6 afterView:root.arrangedSubviews.lastObject];
+
+    // 多任务卡：把手接管操作入口后，LC 自带的 dock 和窗口按钮就是重复
+    // UI。开关默认开（与把手共存即隐藏自带控件），关掉后 dock 下一个 tick
+    // 还原，窗口按钮重放 LC 的 updateVerticalConstraints 还原。
+    UISwitch *hideNative = [UISwitch new];
+    hideNative.on = self.hideNative;
+    [hideNative addTarget:self action:@selector(hideNativeChanged:) forControlEvents:UIControlEventValueChanged];
+    [root addArrangedSubview:[self cardWithRows:@[[self rowWithTitle:@"隐藏自带多任务控件" control:hideNative]]]];
     [root setCustomSpacing:6 afterView:root.arrangedSubviews.lastObject];
 
     NSMutableArray<UIView *> *backgroundRows = [NSMutableArray array];
@@ -3274,6 +3509,7 @@ __attribute__((constructor)) static void LGInitialize(void) {
 - (void)columnsChanged:(UISegmentedControl *)control { [self fire:(control.selectedSegmentIndex == 0 ? LGSheetActionColumns4 : LGSheetActionColumns5) dismiss:NO]; }
 - (void)namesChanged:(UISwitch *)control { [self fire:LGSheetActionToggleNames dismiss:NO]; }
 - (void)spacingChanged:(UISegmentedControl *)control { [self fire:LGSheetActionToggleCompact dismiss:NO]; }
+- (void)hideNativeChanged:(UISwitch *)control { [self fire:LGSheetActionToggleHideNative dismiss:NO]; }
 - (void)chooseTapped { [self fire:LGSheetActionChooseBackground dismiss:YES]; }
 - (void)removeTapped { [self fire:LGSheetActionRemoveBackground dismiss:YES]; }
 - (void)exportTapped { [self fire:LGSheetActionExportLog dismiss:YES]; }

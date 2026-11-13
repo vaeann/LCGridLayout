@@ -654,7 +654,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     UICollectionViewFlowLayout *layout = [UICollectionViewFlowLayout new];
     layout.minimumInteritemSpacing = 0;
     layout.minimumLineSpacing = 16;
-    layout.sectionInset = UIEdgeInsetsMake(4, 12, 28, 12);
+    layout.sectionInset = UIEdgeInsetsMake(10, 12, 28, 12);
     self.collection = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
     self.collection.backgroundColor = UIColor.clearColor;
     self.collection.alwaysBounceVertical = YES;
@@ -719,7 +719,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     UINavigationController *nav = self.navigationController;
     if (nav && !nav.navigationBarHidden && nav.navigationBar) {
         CGFloat bottom = [self lgNavButtonBottomInBar:nav.navigationBar];
-        if (bottom > 0) return bottom + 4;   // small gap under the buttons
+        // Native leaves ~22pt between the button row and the large title; the title
+        // itself is drawn another 8pt lower, so 12 here lands on the same line.
+        if (bottom > 0) return bottom + 12;
         CGFloat status = self.view.window.safeAreaInsets.top;
         if (status <= 0) status = self.view.safeAreaInsets.top;
         CGFloat row = (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) ? 50 : 44;

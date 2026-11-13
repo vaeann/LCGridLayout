@@ -29,6 +29,20 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta5 — 顶部对齐原生：App 大标题 + 下拉搜索（2026-11-13）
+
+需求：宫格页除了内容区以外，视觉要与原生一致——顶部有「App」大标题，搜索栏平时藏着、下拉才出来。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | 新增 `titleLabel` | `UIFontTextStyleLargeTitle`（34pt 粗体）、左 16pt、栏下 8pt，与宿主大标题同款；宫格模式下宿主大标题被覆盖，所以这里复刻一份 |
+| 同上 | `loadView` | 搜索栏默认 `hidden = YES`；占位符改成「搜索」；输入框底色 `tertiarySystemFillColor`，贴近原生 search field |
+| 同上 | `lgLayoutContentWithWidth:height:top:safe:` | 布局拆成独立方法：标题 → 搜索（展开时占 48pt）→ 网格，展开/收起只动这三块 |
+| 同上 | `setSearchRevealed:animated:` | 0.22s 动画；收起时清空输入并重过滤 |
+| 同上 | `scrollViewDidScroll:` | 下拉超过 24pt 展开、上滑超过 12pt 收起；0.35s 冷却避免改帧本身触发回弹 |
+| 同上 | `viewDidLayoutSubviews` | 不再依赖 `hasNativeTopSearch`（原生搜索已被压制隐藏），`top` 只跟导航栏下沿走 |
+| `VERSION` | | 不变（0.0.1，beta 序号 +1） |
+
 ## 0.0.1 beta4 — 冻结宿主列表，断掉搜索展开的源头（2026-11-13）
 
 截图确认：展开出来的空白是**导航栏被拉高**，我们的面板跟着 `navBarBottom` 一起下移。

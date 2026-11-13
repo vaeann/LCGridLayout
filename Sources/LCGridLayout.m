@@ -417,6 +417,14 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic, strong) UIView *dimView;
 @property(nonatomic, strong) UICollectionView *collection;
 @property(nonatomic, strong) UISearchBar *search;
+// The host draws "App" as a large title inside its navigation bar, which sits above
+// our overlay. In grid mode that bar is covered, so the title is reproduced here with
+// the same font and inset to keep the page visually identical.
+@property(nonatomic, strong) UILabel *titleLabel;
+// Native hides its search field until the list is pulled down; mirror that instead of
+// parking an always-visible field above the icons.
+@property(nonatomic) BOOL searchRevealed;
+@property(nonatomic) CFTimeInterval searchToggleTime;
 // Single floating entry point: the settings gear. The layout switch lives inside
 // the sheet now, so only one button floats over the content.
 @property(nonatomic, strong) UIButton *settingsButton;
@@ -463,6 +471,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgLaunchEntry:(LGEntry *)entry;
 - (void)lgCollapseHostSearchIfNeeded;
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
+- (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe;
+- (void)setSearchRevealed:(BOOL)revealed animated:(BOOL)animated;
 - (void)lgFreezeHostContent:(BOOL)freeze;
 - (void)refresh;
 @end
@@ -496,10 +506,18 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.dimView.userInteractionEnabled = NO;
     self.dimView.hidden = YES;
     [self.panel addSubview:self.dimView];
+    self.titleLabel = [UILabel new];
+    self.titleLabel.text = @"App";
+    self.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleLargeTitle];
+    self.titleLabel.adjustsFontForContentSizeCategory = YES;
+    self.titleLabel.textColor = UIColor.labelColor;
+    [self.panel addSubview:self.titleLabel];
     self.search = [UISearchBar new];
     self.search.searchBarStyle = UISearchBarStyleMinimal;
-    self.search.placeholder = @"搜索应用";
+    self.search.placeholder = @"搜索";
     self.search.delegate = self;
+    self.search.hidden = YES;   // revealed by pulling the grid down, like the host
+    self.search.searchTextField.backgroundColor = UIColor.tertiarySystemFillColor;
     [self.panel addSubview:self.search];
     UICollectionViewFlowLayout *layout = [UICollectionViewFlowLayout new];
     layout.minimumInteritemSpacing = 0;
@@ -611,31 +629,21 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     // translucent tab bar); interactive content stays inside the safe area.
     UIEdgeInsets safe = self.view.safeAreaInsets;
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    CGRect nativeSearch = [self lgTopNativeSearchFrame];
-    BOOL hasNativeTopSearch = !CGRectIsEmpty(nativeSearch);
-    self.search.hidden = hasNativeTopSearch;
     CGFloat top = [self lgTopInset] + 2;
-    // Compact = flush under the navigation bar; loose adds breathing room. The old
-    // -44 compensation cancelled the large-title inset and pushed our search field
-    // up behind the bar, so it is gone.
-    if (!hasNativeTopSearch && ![NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top += 24;
-    if (hasNativeTopSearch) top = MAX(top, CGRectGetMaxY(nativeSearch) + 4);
+    // Loose mode adds breathing room under the bar; compact sits flush.
+    if (![NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top += 24;
     self.lastTopInset = [self lgTopInset];
     self.lastSafeInsets = safe;
-    self.hadNativeTopSearch = hasNativeTopSearch;
+    self.hadNativeTopSearch = NO;
     self.panel.frame = self.view.bounds;
     self.backgroundView.frame = self.panel.bounds;
     self.dimView.frame = self.panel.bounds;
-    self.search.frame = CGRectMake(4, top, MAX(0,w-8), 48);
+    [self lgLayoutContentWithWidth:w height:h top:top safe:safe];
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
     self.footer.frame = CGRectMake(0, MAX(0, h-safe.bottom-footerHeight-footerGap), w, footerHeight);
-    CGFloat headerHeight = hasNativeTopSearch ? 8 : 48;
-    CGRect frame = CGRectMake(0, top+headerHeight, w, MAX(0, h-top-headerHeight-safe.bottom-footerHeight-footerGap-2));
-    BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
-    self.collection.frame = frame;
-    // Both buttons sit just above the tab bar. safeAreaInsets.bottom is the tab
-    // bar's own inset, so clamp to its real top edge instead.
+    // The gear sits just above the tab bar. safeAreaInsets.bottom is the tab bar's
+    // own inset, so clamp to its real top edge instead.
     CGFloat bottomLimit = h - safe.bottom;
     UITabBar *tabBar = self.tabBarController.tabBar;
     if (tabBar && !tabBar.hidden && tabBar.window) {
@@ -645,8 +653,66 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     CGFloat buttonHeight = 44, settingsWidth = 44;
     self.settingsButton.frame = CGRectMake(MAX(8, w - 16 - settingsWidth), MAX(0, bottomLimit - buttonHeight - 14), settingsWidth, buttonHeight);
     if (!self.nativeMode) [self lgEnsureNavGuard];
+    [self lgFreezeHostContent:!self.nativeMode];
+}
+
+// Title / search / grid frames. Split out so revealing the search field can animate
+// just these three without a full layout pass.
+- (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe {
+    CGFloat titleHeight = ceil(self.titleLabel.font.lineHeight);
+    // 16pt inset and an 8pt gap under the bar are what the host's large title looks
+    // like in the native page.
+    self.titleLabel.frame = CGRectMake(16, top + 8, MAX(0, w - 32), titleHeight);
+    CGFloat contentTop = top + 8 + titleHeight + 8;
+    self.search.hidden = !self.searchRevealed;
+    self.search.frame = CGRectMake(4, contentTop, MAX(0, w - 8), 48);
+    CGFloat headerHeight = self.searchRevealed ? 48 : 0;
+    CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
+    CGFloat footerGap = 14;
+    CGRect frame = CGRectMake(0, contentTop + headerHeight, w,
+        MAX(0, h - (contentTop + headerHeight) - safe.bottom - footerHeight - footerGap - 2));
+    BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
+    self.collection.frame = frame;
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }
+
+- (void)setSearchRevealed:(BOOL)revealed animated:(BOOL)animated {
+    if (self.searchRevealed == revealed) return;
+    self.searchRevealed = revealed;
+    self.searchToggleTime = CFAbsoluteTimeGetCurrent();
+    void (^changes)(void) = ^{
+        [self lgLayoutContentWithWidth:self.view.bounds.size.width
+                                height:self.view.bounds.size.height
+                                   top:[self lgTopInset] + 2 +
+                                       ([NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop] ? 0 : 24)
+                                  safe:self.view.safeAreaInsets];
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseOut
+                         animations:changes completion:nil];
+    } else {
+        changes();
+    }
+    if (!revealed) {
+        self.search.text = @"";
+        [self.search resignFirstResponder];
+        [self filter];
+    }
+}
+
+// Same behaviour as the host list: pull down past the top to reveal the field, scroll
+// up again to put it away. The cooldown keeps the frame change itself from re-triggering.
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView != self.collection) return;
+    if (CFAbsoluteTimeGetCurrent() - self.searchToggleTime < 0.35) return;
+    CGFloat offset = scrollView.contentOffset.y + scrollView.adjustedContentInset.top;
+    if (!self.searchRevealed && offset < -24) {
+        [self setSearchRevealed:YES animated:YES];
+    } else if (self.searchRevealed && offset > 12 && !self.search.isFirstResponder) {
+        [self setSearchRevealed:NO animated:YES];
+    }
+}
+
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
     [self lgSuppressNativeSearch:!self.nativeMode];

@@ -606,9 +606,19 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (BOOL)lgShouldUseMultitask:(LGEntry *)entry;
 - (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry;
 - (void)lgUpdateTabVisibility;
-- (BOOL)lgOnAppsTab;
+- (NSNumber *)lgAppsTabState;
+- (NSString *)lgAppsTabTitle;
+- (NSNumber *)lgSelectedTabViaAccessibility:(NSString *)apps;
+- (NSNumber *)lgNavTitleState:(NSString *)apps;
+- (BOOL)lgViewOnScreen:(UIView *)view;
+- (NSString *)lgNavLabelDump;
+- (CGRect)lgNativeTitleFrame;
 @property(nonatomic) CFTimeInterval lastLaunchTime;
 @property(nonatomic) CFTimeInterval lastTabCheck;
+@property(nonatomic) BOOL loggedLayout;
+@property(nonatomic) BOOL onAppsTab;
+@property(nonatomic) CFTimeInterval lastNativeTitleProbe;
+@property(nonatomic) CGRect cachedNativeTitleFrame;
 @property(nonatomic, weak) UITabBar *cachedTabBar;
 - (void)lgCollapseHostSearchIfNeeded;
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
@@ -672,7 +682,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     UICollectionViewFlowLayout *layout = [UICollectionViewFlowLayout new];
     layout.minimumInteritemSpacing = 0;
     layout.minimumLineSpacing = 16;
-    layout.sectionInset = UIEdgeInsetsMake(10, 12, 28, 12);
+    layout.sectionInset = UIEdgeInsetsMake(10, 16, 28, 16);
     self.collection = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
     self.collection.backgroundColor = UIColor.clearColor;
     self.collection.alwaysBounceVertical = YES;
@@ -725,6 +735,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         [weakSelf mirrorNativeSearchText:note.object];
     }];
     self.nativeMode = [NSUserDefaults.standardUserDefaults boolForKey:LGNative];
+    self.onAppsTab = YES;   // until the tab probe says otherwise
     [self applyMode];
     [self loadBackground];
     [self refresh];
@@ -781,6 +792,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // offset (the big blank above the toolbar). Re-layout when that geometry moves.
 - (void)lgSyncLayout {
     [self lgUpdateTabVisibility];
+    // Another tab is up: the host page underneath owns the screen, and freezing or
+    // restyling anything from here would hit pages that are not ours.
+    if (!self.onAppsTab) return;
     if (!self.nativeMode) {
         // SwiftUI rebuilds the page (and its search bar) on tab switches; re-apply
         // the suppression, but only a couple of times per second — the walk covers
@@ -852,9 +866,11 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     }
     CGFloat buttonHeight = 44, settingsWidth = 44;
     self.switchButton.frame = CGRectMake(MAX(8, w - 16 - settingsWidth), MAX(0, bottomLimit - buttonHeight - 14), settingsWidth, buttonHeight);
-    if (!self.nativeMode) [self lgEnsureNavGuard];
-    [self lgFreezeHostContent:!self.nativeMode];
     [self lgUpdateTabVisibility];
+    if (self.onAppsTab) {
+        if (!self.nativeMode) [self lgEnsureNavGuard];
+        [self lgFreezeHostContent:!self.nativeMode];
+    }
 }
 
 // First large-title label the host has on screen. Used once per session, to compare
@@ -870,6 +886,11 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         visited++;
         if ([view isKindOfClass:UILabel.class]) {
             UILabel *label = (UILabel *)view;
+            // Never match our own "App" — it is the same size and would make the
+            // alignment read its own position back.
+            if ([label isDescendantOfView:self.view]) {
+                continue;
+            }
             if (label.font.pointSize >= 30 && label.font.pointSize <= 40 &&
                 label.text.length > 0 && !label.hidden && label.alpha > 0.05) return label;
         }
@@ -878,20 +899,82 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     return nil;
 }
 
+// Native large title frame in our own coordinates. Probed once a second rather than
+// on every layout pass: it walks the whole window, and the value only changes when
+// the host re-lays out. CGRectNull means "not found yet", which makes the caller fall
+// back to its own default.
+- (CGRect)lgNativeTitleFrame {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - self.lastNativeTitleProbe < 1.0) return self.cachedNativeTitleFrame;
+    self.lastNativeTitleProbe = now;
+    UILabel *label = [self lgNativeLargeTitle];
+    self.cachedNativeTitleFrame = label
+        ? [label convertRect:label.bounds toView:self.view]
+        : CGRectNull;
+    return self.cachedNativeTitleFrame;
+}
+
+// One-shot dump of every label inside the host navigation bar. The large title is
+// not a plain UILabel on every iOS version, so guessing its frame from a font size
+// was unreliable; this prints what is actually there.
+- (NSString *)lgNavLabelDump {
+    UIWindow *window = self.view.window;
+    if (!window) return @"(no window)";
+    UINavigationBar *bar = nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:window];
+    NSUInteger visited = 0;
+    while (queue.count > 0 && visited < 900) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        visited++;
+        if ([view isKindOfClass:UINavigationBar.class]) { bar = (UINavigationBar *)view; break; }
+        for (UIView *sub in view.subviews) [queue addObject:sub];
+    }
+    if (!bar) return @"(no nav bar)";
+    NSMutableString *out = [NSMutableString string];
+    NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithObject:bar];
+    visited = 0;
+    while (pending.count > 0 && visited < 500 && out.length < 300) {
+        UIView *view = pending.firstObject;
+        [pending removeObjectAtIndex:0];
+        visited++;
+        if ([view isKindOfClass:UILabel.class]) {
+            UILabel *label = (UILabel *)view;
+            if (label.text.length > 0) {
+                [out appendFormat:@"\"%@\" %.0fpt %@  ", label.text, label.font.pointSize,
+                 NSStringFromCGRect([label convertRect:label.bounds toView:self.view])];
+            }
+        }
+        for (UIView *sub in view.subviews) [pending addObject:sub];
+    }
+    return out.length > 0 ? out : @"(no labels)";
+}
+
 // Title / search / grid frames. Split out so revealing the search field can animate
 // just these three without a full layout pass.
 - (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe {
     CGFloat titleHeight = ceil(self.titleLabel.font.lineHeight);
-    // 16pt inset and an 8pt gap under the bar are what the host's large title looks
-    // like in the native page.
-    self.titleLabel.frame = CGRectMake(16, top + 8, MAX(0, w - 32), titleHeight);
     CGFloat contentTop = top + 8 + titleHeight + 6;
     self.search.hidden = !self.searchRevealed;
-    // UISearchBar keeps its own 8pt inset on each side, so a bar at x=8 / w-16 puts
-    // the field itself at 16..w-16 — the same edges the host's large title and its
-    // searchable field use. A bar at x=4 made the field 4pt wider on both sides than
-    // the native one, which was visible when toggling between the two layouts.
-    self.search.frame = CGRectMake(8, contentTop, MAX(0, w - 16), 48);
+    // The host list keeps everything on one 16pt vertical line: large title, search
+    // field and row content all start there. UISearchBar adds its own inset inside
+    // that frame, and the value differs between iOS versions, so take the line from
+    // the text field itself instead of hard-coding what that inset is.
+    CGFloat barX = 8;
+    self.search.frame = CGRectMake(barX, contentTop, MAX(0, w - barX * 2), 48);
+    [self.search layoutIfNeeded];
+    CGFloat inset = 16;
+    CGFloat fieldX = CGRectGetMinX(self.search.searchTextField.frame);
+    if (fieldX > 0 && fieldX < 40) inset = barX + fieldX;
+    // Follow the host's own large title when it can be measured. That is the only
+    // value guaranteed to match, whatever horizontal inset this iOS version uses —
+    // the host title sits right above the grid and is simply covered, not removed.
+    CGRect hostTitle = [self lgNativeTitleFrame];
+    if (!CGRectIsNull(hostTitle)) {
+        CGFloat hostX = CGRectGetMinX(hostTitle);
+        if (hostX > 4 && hostX < 60) inset = hostX;
+    }
+    self.titleLabel.frame = CGRectMake(inset, top + 8, MAX(0, w - inset * 2), titleHeight);
     CGFloat headerHeight = self.searchRevealed ? 48 : 0;
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
@@ -900,16 +983,16 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
-    static BOOL loggedLayout = NO;
-    if (!loggedLayout) {
-        loggedLayout = YES;
-        UILabel *nativeTitle = [self lgNativeLargeTitle];
-        NSString *nativeFrame = nativeTitle
-            ? NSStringFromCGRect([nativeTitle convertRect:nativeTitle.bounds toView:self.view])
-            : @"(none)";
-        LGLog([NSString stringWithFormat:@"Layout top=%.0f title=%@ nativeTitle=%@ grid=%@ inset=%.0f",
-               top, NSStringFromCGRect(self.titleLabel.frame), nativeFrame, NSStringFromCGRect(frame),
-               self.collection.adjustedContentInset.top]);
+    // Measure once the overlay actually has a window: on the first mount it does not,
+    // and the host's large title is unreachable, which is why the earlier probe said
+    // "(none)". Reset on every layout switch so both states get a reading.
+    if (!self.loggedLayout && self.view.window) {
+        self.loggedLayout = YES;
+        CGRect measured = [self lgNativeTitleFrame];
+        NSString *nativeFrame = CGRectIsNull(measured) ? @"(none)" : NSStringFromCGRect(measured);
+        LGLog([NSString stringWithFormat:@"Layout top=%.0f inset=%.0f search=%@ title=%@ nativeTitle=%@ grid=%@ navLabels=%@",
+               top, inset, NSStringFromCGRect(self.search.frame), NSStringFromCGRect(self.titleLabel.frame),
+               nativeFrame, NSStringFromCGRect(frame), [self lgNavLabelDump]]);
     }
 }
 
@@ -923,36 +1006,136 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     return nil;
 }
 
-// LiveContainer's shell is a single SwiftUI TabView (LCTabView), so the overlay sits
-// in the container shared by all four tabs. The switch button belongs to the Apps
-// tab only; the others are host pages the grid has nothing to say about.
-- (BOOL)lgOnAppsTab {
+- (NSString *)lgAppsTabTitle {
+    NSBundle *bundle = LGGet(NSUserDefaults.class, @"lcMainBundle");
+    return [bundle localizedStringForKey:@"lc.tabView.apps" value:@"" table:nil];
+}
+
+// LiveContainer's shell is a single SwiftUI TabView (LCTabView): all four tabs share
+// one hosting container, so the overlay covers every page unless it is told which
+// tab is up. A wrong guess blanks the grid, so the answer is three-valued — @YES and
+// @NO only when the selected tab is actually readable, nil when it is not.
+- (NSNumber *)lgAppsTabState {
+    NSString *apps = [self lgAppsTabTitle];
+    if (apps.length == 0) return nil;   // localization unavailable: never hide
+
+    UITabBarController *tabs = self.tabBarController;
+    if (tabs) {
+        NSString *title = tabs.selectedViewController.tabBarItem.title;
+        if (title.length == 0) {
+            NSInteger index = tabs.selectedIndex;
+            if (index >= 0 && index < (NSInteger)tabs.tabBar.items.count) {
+                title = tabs.tabBar.items[index].title;
+            }
+        }
+        if (title.length > 0) return @([title isEqualToString:apps]);
+    }
+
     UITabBar *bar = self.cachedTabBar;
     if (!bar || !bar.window) {
         bar = [self lgTabBarIn:self.view.window];
         self.cachedTabBar = bar;
     }
-    if (!bar || !bar.selectedItem) return YES;   // Unknown shell: keep the old behaviour
-    NSBundle *bundle = LGGet(NSUserDefaults.class, @"lcMainBundle");
-    // Empty fallback: if the host bundle cannot resolve the key, hide nothing rather
-    // than leaving the button invisible on every tab.
-    NSString *apps = [bundle localizedStringForKey:@"lc.tabView.apps" value:@"" table:nil];
-    if (apps.length == 0) return YES;
-    return [bar.selectedItem.title isEqualToString:apps];
+    if (bar.selectedItem.title.length > 0) return @([bar.selectedItem.title isEqualToString:apps]);
+
+    // SwiftUI's own NavigationStack still shows a real UINavigationBar; the Apps page
+    // is the only one whose bar carries this title.
+    NSNumber *navState = [self lgNavTitleState:apps];
+    if (navState) return navState;
+
+    // Last resort: even a self-drawn SwiftUI tab bar exposes the selected item as an
+    // accessibility element carrying the selected trait.
+    return [self lgSelectedTabViaAccessibility:apps];
+}
+
+- (BOOL)lgViewOnScreen:(UIView *)view {
+    if (!view || !view.window) return NO;
+    for (UIView *v = view; v; v = v.superview) {
+        if (v.hidden || v.alpha < 0.1) return NO;
+    }
+    CGRect frame = [view convertRect:view.bounds toView:view.window];
+    return CGRectIntersectsRect(frame, view.window.bounds);
+}
+
+- (NSNumber *)lgNavTitleState:(NSString *)apps {
+    UIWindow *window = self.view.window;
+    if (!window) return nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:window];
+    NSUInteger visited = 0;
+    while (queue.count > 0 && visited < 900) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        visited++;
+        if ([view isKindOfClass:UINavigationBar.class] && [self lgViewOnScreen:view]) {
+            UINavigationBar *bar = (UINavigationBar *)view;
+            NSString *title = bar.topItem.title ?: bar.items.firstObject.title;
+            if (title.length > 0) return @([title isEqualToString:apps]);
+        }
+        for (UIView *sub in view.subviews) [queue addObject:sub];
+    }
+    return nil;
+}
+
+- (NSNumber *)lgSelectedTabViaAccessibility:(NSString *)apps {
+    UIWindow *window = self.view.window;
+    if (!window) return nil;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:window];
+    NSUInteger visited = 0;
+    while (stack.count > 0 && visited < 1200) {
+        id node = stack.lastObject;
+        [stack removeLastObject];
+        visited++;
+        NSString *label = nil;
+        UIAccessibilityTraits traits = 0;
+        if ([node isKindOfClass:UIView.class]) {
+            UIView *view = node;
+            if (view.isAccessibilityElement) {
+                label = view.accessibilityLabel;
+                traits = view.accessibilityTraits;
+            }
+            NSArray *elements = view.accessibilityElements;
+            if (elements.count > 0) {
+                for (id element in elements) if (element != view) [stack addObject:element];
+            }
+            for (UIView *sub in view.subviews) [stack addObject:sub];
+        } else if ([node respondsToSelector:@selector(accessibilityLabel)] &&
+                   [node respondsToSelector:@selector(accessibilityTraits)]) {
+            label = [(id)node accessibilityLabel];
+            traits = [(id)node accessibilityTraits];
+        }
+        if (label.length > 0 && (traits & UIAccessibilityTraitSelected)) {
+            return @([label isEqualToString:apps]);
+        }
+    }
+    return nil;
 }
 
 - (void)lgUpdateTabVisibility {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - self.lastTabCheck < 0.3) return;
+    if (now - self.lastTabCheck < 0.15) return;
     self.lastTabCheck = now;
-    BOOL onApps = [self lgOnAppsTab];
+    NSNumber *state = [self lgAppsTabState];
+    BOOL onApps = state ? state.boolValue : YES;
+    self.onAppsTab = onApps;
+    // The overlay sits in the container shared by all four tabs, so on any other tab
+    // it would paint the grid over that page. Hide the content and the button, but
+    // keep the (transparent, hit-test-passing) view itself mounted so switching back
+    // does not depend on a probe that may not be able to read the current tab.
+    self.panel.hidden = self.nativeMode || !onApps;
     self.switchButton.hidden = !onApps;
-    // Log on change only: the check runs a few times a second.
-    static NSInteger lastOnApps = -1;
-    if ((NSInteger)onApps != lastOnApps) {
-        lastOnApps = (NSInteger)onApps;
-        LGLog([NSString stringWithFormat:@"Apps tab active=%d (selected=%@)",
-               onApps, self.cachedTabBar.selectedItem.title ?: @"?"]);
+    // The freeze pass disables every sibling of the overlay — on the shared container
+    // that includes the other three tabs, which would leave them unresponsive.
+    if (!onApps && !self.nativeMode) [self lgFreezeHostContent:NO];
+    NSInteger current = state ? (state.boolValue ? 1 : 0) : -1;
+    static NSInteger lastState = -2;
+    if (current != lastState) {
+        lastState = current;
+        UITabBarController *tabs = self.tabBarController;
+        NSString *selected = tabs.selectedViewController.tabBarItem.title ?: self.cachedTabBar.selectedItem.title;
+        LGLog([NSString stringWithFormat:@"Apps tab state=%ld selected=%@ tabBar=%@ tabBarVC=%@",
+               (long)current, selected.length ? selected : @"?",
+               self.cachedTabBar ? NSStringFromClass(self.cachedTabBar.class) : @"nil",
+               tabs ? NSStringFromClass(tabs.class) : @"nil"]);
     }
 }
 
@@ -1011,7 +1194,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self showSettings];
 }
 - (void)applyMode {
-    self.panel.hidden = self.nativeMode;
+    self.panel.hidden = self.nativeMode || !self.onAppsTab;
     [self lgUpdateSwitchButton];
     [self lgSuppressNativeSearch:!self.nativeMode];
     [self lgFreezeHostContent:!self.nativeMode];
@@ -1021,8 +1204,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     }
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
-- (void)showNative { [self.view endEditing:YES]; self.nativeMode = YES; [self applyMode]; }
-- (void)showGrid { self.nativeMode = NO; [self applyMode]; [self refresh]; }
+- (void)showNative { [self.view endEditing:YES]; self.nativeMode = YES; self.loggedLayout = NO; self.lastNativeTitleProbe = 0; [self applyMode]; }
+- (void)showGrid { self.nativeMode = NO; self.loggedLayout = NO; self.lastNativeTitleProbe = 0; [self applyMode]; [self refresh]; }
 - (void)refresh {
     self.entries = LGReadApps(self.hiddenUnlocked);
     // Keep the icon cache: clearing it forced every icon to be regenerated on each
@@ -1091,7 +1274,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 - (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)layout sizeForItemAtIndexPath:(NSIndexPath *)path {
     NSInteger columns = [NSUserDefaults.standardUserDefaults integerForKey:LGColumns] == 5 ? 5 : 4;
-    CGFloat width = floor(MAX(0, collectionView.bounds.size.width - 24) / columns);
+    // Match sectionInset's 16pt sides: the host list starts its rows on the same line.
+    CGFloat width = floor(MAX(0, collectionView.bounds.size.width - 32) / columns);
     return CGSizeMake(width, [NSUserDefaults.standardUserDefaults boolForKey:LGNames] ? 92 : 74);
 }
 - (NSString *)iconKeyForEntry:(LGEntry *)entry {
@@ -2073,6 +2257,10 @@ static void LGTick(void) {
         }
     }
     for (LGGridController *grid in LGOverlays) {
+        // Independent of `active`: when SwiftUI swaps tab containers the host page can
+        // drop out of the window entirely, and this is the only thing that brings the
+        // overlay back when the Apps tab returns.
+        [grid lgUpdateTabVisibility];
         // Never hide the overlay while the host page is off-screen (tab switch,
         // pushed sheet): the view is simply not visible then, and hiding it makes
         // the native list flash for up to one tick when the user comes back.

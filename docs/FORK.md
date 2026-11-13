@@ -29,6 +29,20 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta13 — 覆盖层跟随 tab、边距统一 16pt（2026-11-13）
+
+beta12 实测：四个 tab 都能看到按钮，宫格模式下切到其他 tab 会被宫格整页盖住。
+日志 `Apps tab state=1 selected=?` 说明 LC 的 tab 栏不是 `UITabBar`（SwiftUI 自绘），
+按 `selectedItem.title` 判断失效；同时整页覆盖说明覆盖层位于四个 tab 共享的容器。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgAppsTabState` | 四路探测，只有读出明确结果才返回：`tabBarController` 选中项的 `tabBarItem.title` → `UITabBar.selectedItem.title` → 可见 `UINavigationBar.topItem.title` → accessibility 里带 selected trait 的元素；都读不到返回 nil（不隐藏） |
+| 同上 | `lgUpdateTabVisibility` | 非 Apps tab 时隐藏 `panel` 与按钮（**保留**透明、hitTest 穿透的 view 本身，避免探测失败后再也回不来），并 `lgFreezeHostContent:NO` 解除冻结——冻结会连其他 tab 一起禁掉交互 |
+| 同上 | `LGTick` | 每个 overlay 无条件做一次 tab 检查，不依赖 `active`（SwiftUI 换 tab 时宿主可能整体离开 window） |
+| 同上 | `lgLayoutContentWithWidth` | 标题 x 改为**跟随宿主大标题的实测 x**（`lgNativeTitleFrame`，1s 探测一次、排除自身 label）；读不到时先按 `searchTextField` 反推，再兜底 16；`sectionInset` 左右 12 → 16，列宽 `w-24` → `w-32`，与原生列表的 16pt 行边距一致 |
+| 同上 | 测量日志 | 改为 `self.view.window` 存在后才打，切布局会重置重测；新增 `navLabels=` 输出导航栏内全部 `UILabel` 的文本/字号/frame |
+
 ## 0.0.1 beta12 — 搜索栏对齐、跟随多任务设置、按钮限定 App 页（2026-11-13）
 
 | 文件 | 位置 | 改动 |

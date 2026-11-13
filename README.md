@@ -105,6 +105,7 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
+- **0.0.1 beta13**：修复切到其他标签页后宫格仍盖住页面——覆盖层在四个 tab 共享的容器里，现在按选中 tab 隐藏内容与按钮，并解除对宿主页面的冻结；标题与搜索框改为**跟随宿主实测位置**（读不到才退回 16pt），网格左右统一 16pt；测量日志改为拿到 window 之后再打，并输出导航栏全部 label
 - **0.0.1 beta12**：搜索栏改为 `x=8`、宽 `w-16`（文字边缘落在 16..w-16，与标题和原生搜索框对齐）；启动方式跟随 LC 设置——按 app 的 `MultitaskSpecified` 与全局 `LCLaunchInMultitaskMode` 走多任务窗口，经典模式 / 需要 JIT 的 app 仍走原路径；布局切换按钮只在 App 标签页显示
 - **0.0.1 beta11**：冷启动不再闪原生列表——改用 `viewWillAppear:` / `viewDidLayoutSubviews` 外观回调提前挂载，挂载后同步 `layoutIfNeeded`，首帧即宫格；0.1s 轮询降级为兜底
 - **0.0.1 beta10**：按原生截图对齐间距——标题与按钮行 20pt、搜索栏与首行 24pt

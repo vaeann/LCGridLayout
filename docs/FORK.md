@@ -29,7 +29,7 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
-## 0.0.2 — 单按钮、图标与启动修复、搜索压制（2026-11-13）
+## 0.0.1 beta2 — 单按钮、图标与启动修复、搜索压制（2026-11-13）
 
 四条实测反馈：布局切换按钮多余、图标首帧闪一块纯色、个别 app 点了报「未能打开文件」、
 网格下双击顶部会弹出 LC 的原生搜索并把我们的搜索框盖住。
@@ -45,7 +45,7 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 同上 | `lgSuppressNativeSearch:` / `LGCollectSearchBars` | 网格模式隐藏宿主 search bar 并关掉交互，每 0.5s 复查（SwiftUI 会重建）；切回原生恢复 |
 | 同上 | `lgEnsureNavGuard` / `gestureRecognizer:shouldReceiveTouch:` | 在 `nav.view` 上吞掉导航区空白处的双击（按钮除外），阻止 LC 的 searchable 被唤起；离开网格模式时移除 |
 | 同上 | `viewDidLayoutSubviews` | 去掉 `compactTop` 的 `-44`（它会把我们的搜索框顶进导航栏）；紧凑＝紧贴栏底，宽松＝+24 |
-| `VERSION` | | 0.0.1 → 0.0.2 |
+| `VERSION` | | 保持 0.0.1（测试阶段不升版本号，只加 beta 序号） |
 
 ## 版本与发布标记（2026-11-13）
 
@@ -54,8 +54,11 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 
 | 阶段 | tag | 标题 | 说明 |
 |---|---|---|---|
-| 测试版 | `v0.0.1-beta1`、`-beta2` … | `LCGridLayout v0.0.1 beta1` | 标为 pre-release；序号**按版本号独立计数** |
-| 正式版 | `v0.0.1` | `LCGridLayout v0.0.1` | 不带 beta，之后靠版本号递增（0.0.2、0.0.3 …） |
+| 测试版 | `v0.0.1-beta1`、`-beta2` … | `LCGridLayout v0.0.1 beta1` | 标为 pre-release；**`VERSION` 不动**，只有 beta 序号递增 |
+| 正式版 | `v0.0.1` | `LCGridLayout v0.0.1` | 去掉 beta，标记为 latest；之后改动才把 `VERSION` 升到 0.0.2 |
+
+**规则**：只要 0.0.1 还没正式发布，所有测试包都叫 `v0.0.1-betaN`。
+版本号只在**发布正式版之后**才往上走（0.0.2、0.0.3 …），不要每改一轮就升版本。
 
 beta 序号由 `build.yml` 的「计算发布标记」步骤现算：取现存 `v{版本}-betaN` 里最大的 N 加一。
 **不能用 `github.run_number`**——那是仓库级累计值，跟版本无关，几十次无关构建会把

@@ -978,9 +978,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         self.titleLabel.font = self.cachedNativeTitleFont;
     }
     CGFloat titleHeight = ceil(self.titleLabel.font.lineHeight);
-    // +11, not +13: with the host's own font the glyphs sit ~2pt higher than the
-    // copied frame suggested, and +13 read as slightly low.
-    CGFloat contentTop = top + 11 + titleHeight + 6;
+    // +12: +13 was 2pt too low and +11 1pt too high with the host's own font.
+    CGFloat contentTop = top + 12 + titleHeight + 6;
     self.search.hidden = !self.searchRevealed;
     // The host list keeps everything on one 16pt vertical line: large title, search
     // field and row content all start there. UISearchBar adds its own inset inside
@@ -1000,7 +999,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         CGFloat hostX = CGRectGetMinX(hostTitle);
         if (hostX > 4 && hostX < 60) inset = hostX;
     }
-    self.titleLabel.frame = CGRectMake(inset, top + 11, MAX(0, w - inset * 2), titleHeight);
+    self.titleLabel.frame = CGRectMake(inset, top + 12, MAX(0, w - inset * 2), titleHeight);
     CGFloat headerHeight = self.searchRevealed ? 48 : 0;
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
@@ -2436,6 +2435,10 @@ __attribute__((constructor)) static void LGInitialize(void) {
         LGInstallAppearanceHooks();
         LGInstallTabSwitchHook();
         dispatch_async(dispatch_get_main_queue(), ^{
+            // Start every launch with a clean log. LGLog appends and only rewrites past
+            // 128 KB, so old processes' lines used to pile up and the exported file was
+            // mostly history. One session per file is what the export button implies.
+            [NSFileManager.defaultManager removeItemAtPath:LGLogPath() error:nil];
             LGLog([NSString stringWithFormat:@"Host gate passed: LiveContainer %@ (>= 3.8.0); %@ loaded; hooks viewWillAppear=%d viewDidLayoutSubviews=%d",
                    LGDetectedVersion ?: @"?", LGLoadedName(), LGWillAppearHooked, LGDidLayoutHooked]);
             // Polling is now only a safety net: the appearance hooks do the real

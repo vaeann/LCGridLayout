@@ -110,8 +110,8 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 排序 | `saveOrder` / `moveItemAtIndexPath` | 存 folder 名数组；宿主已选 custom 时同步镜像 |
 | 解锁 | `footerTapped` / `setHiddenUnlocked` | 三击 → `LAContext` 认证 |
 | 设置 | `showSettings` + `LGSheetController` | 卡片式 sheet（medium/large detent）：分段控件管列数与间距，开关管名称，按钮管背景与日志 |
-| 布局切换 | `lgInstallSwitchButton` / `toggleMode` | 导航栏右侧一个按钮，图标反映*目标*模式；`lgSyncLayout` 每 tick 补挂，防止 SwiftUI 重建 `navigationItem` 时丢掉 |
-| 搜索压制 | `lgSuppressNativeSearch:` | 网格模式把 LC 的 search bar 设为 `hidden`（不是 alpha），连展开动画和占位一起消掉 |
+| 布局切换 | `toggleMode` / `lgUpdateSwitchButton` | 右下角胶囊，文案与图标反映*目标*模式；挂在 `self.view` 上，两种模式都可见。**不要试图改宿主 navigationItem——SwiftUI 自绘，塞进去不显示** |
+| 设置入口 | `showSettings` / `LGSheetController` | 齿轮按钮 → 分组卡片面板：分段控件管列数/间距，开关管名称，圆角按钮管背景与日志 |
 | 覆盖范围 | — | 网格只覆盖 `host.view`（= 搜索栏 + app 列表）。导航栏在 `nav.view` 上，天然不被覆盖 |
 | 背景 | `chooseBackground` / `applyBackground` / `removeBackground` | PHPicker，最长边压到 2200px 存 JPEG |
 
@@ -245,7 +245,7 @@ panel       = view.bounds                    ← 铺满，盖住标签栏毛玻�
 
 | 手段 | 怎么做 |
 |---|---|
-| 插件日志 | `Library/Logs/LCGridLayout.log`，或在「长按空白 → 导出调试日志」 |
+| 插件日志 | `Library/Logs/LCGridLayout.log`，或在「齿轮 → 导出调试日志」 |
 | 确认加载 | 日志第一行必须是 `Host gate passed: LiveContainer <版本> ...; LCGridLayout_vNN.dylib loaded` |
 | 确认挂载 | 必须有 `Mounted on native app-list hosting controller after N ms`；只有第一行不算成功 |
 | 没挂上 | 等 6 秒，日志会附 view hierarchy dump，改 `LGFindList` 前先看它 |

@@ -8,7 +8,6 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <unistd.h>
-#import <string.h>
 
 static NSString *const LGColumns = @"LCGridLayout.columns";
 static NSString *const LGNames = @"LCGridLayout.showNames";

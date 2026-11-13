@@ -85,13 +85,12 @@ PresenterReady
 → `openWindow(id:"appView", value: a.key)` 激活已有 scene；否则 `MultitaskDockManager
 .bringMultitaskViewToFront(uuid:)`。命中即 `return`，绝不二次启动。
 
-| 文件 | 位置 | 改动 |
-|---|---|---|
-| `Sources/LCGridLayout.m` | `lgLaunchMultitaskEntry:` 开头 | 新增短路：`LGRunningGuest(entry.container)` 为真时先调 `+[MultitaskWindowManager openExistingAppWindowWithDataUUID:]`，返回 YES 就记日志并跳过启动 |
-| 同上 | 兜底 | 窗口不存在（容器被别的 LC 实例占用，或窗口只在坞里）时保持原行为照旧启动，不静默失败 |
+**当时（beta19）的改法，已删除**：在 `lgLaunchMultitaskEntry:` 开头加短路，
+`LGRunningGuest(entry.container)` 为真时调 `+[MultitaskWindowManager
+openExistingAppWindowWithDataUUID:]`，返回 YES 就跳过启动。上线后照崩，原因见下一节。
 
-已知限制：`MultitaskDockManager.bringMultitaskViewToFront` 没标 `@objc`，ObjC 侧取不到，
-所以「坞里已最小化」这一路仍可能复现，需要时再想办法（或让 LC 官方补 `@objc`）。
+> 遗留认知：`MultitaskDockManager.bringMultitaskViewToFront` 没标 `@objc`，ObjC 侧取不到，
+> 「坞里已最小化」这一路目前没有 API 可用。
 
 ## 0.0.1 beta18 — 标题落回 119.333、回收旧覆盖层（2026-11-13）
 

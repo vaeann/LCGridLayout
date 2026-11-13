@@ -29,7 +29,42 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
-## 0.0.1 beta19 — 修「点正在运行的应用」闪退（2026-11-13）
+## 0.0.1 beta20 — 改用微珠同款「拒绝」策略（2026-11-13）
+
+beta19 上线后**仍然崩溃**，两份 `.ips` 栈帧与第一次完全一致（`setUpAppPresenter` →
+`FBSSceneClientIdentity identityForProcessIdentity:` trap），加载的是 beta19 的 dylib。
+
+复盘 beta19 为什么没用：`MultitaskWindowManager.openExistingAppWindow(dataUUID:)`
+内部也是 `openWindow(id:"appView", value: dataUUID)`——**和直接启动是同一条调用**。
+`openWindow` 每次都请求新的 scene session，所以「前置」实际上又建了一个 scene、
+又跑了一次 `AppSceneViewController.init` → 又崩。换句话说 beta19 只是换了个入口撞同一堵墙。
+
+正确的参考实现在微珠 `LCOrbitMultitask.launchGuest:`（`LCOrbitMultitask.m:334`）：
+
+1. 它自己的窗口列表里有这个 guest → `orbit_activate` 前置，`return`；
+2. `LCSharedUtils getContainerUsingLCSchemeWithFolderName:` 非空 → **直接拒绝**，不启动；
+3. 两步都不中 → 才调 `launchMultitaskGuestApp:`。
+
+它**从不**调用任何可能新建 scene 的接口。beta20 照这个来：
+
+| 信号 | 来源 | 说明 |
+|---|---|---|
+| ① | `+[LCOrbitMultitask isRunningGuest:]` | 微珠管着窗口，最可靠；guest 字典与 `closeGuest:` 同一格式 |
+| ② | `LGRunningGuest()`（容器占用锁） | LC 自己的「容器在用」判断，微珠启动前用的就是它 |
+| ③ | `LGLiveSceneForContainer()` | 遍历 `connectedScenes` 的所有窗口，按公开属性 `dataUUID` 找活着的 `AppSceneViewController`；不依赖锁文件、不依赖微珠 |
+
+任一信号命中 → **不启动**，并只做两件事之一：
+
+- 用 `requestSceneSessionActivation:`（公开 API，激活已存在的 session，不可能新建 scene）把窗口提到前台；
+- 找不到 session 就弹提示「『X』正在运行。请切换到它的窗口，或先在微珠里关闭它。」
+
+`MultitaskManager.isUsing(container:)` 看着更对口，但它的注册函数 `registerMultitaskContainer`
+**全库没有任何调用方**，列表永远为空，用不了——已核过。
+
+判断依据在日志里：`Guest already running (detected by %@)` 的 `%@` 会写明
+`orbit` / `container-lock` / `scene`，一眼能看出是哪一路命中的。
+
+## 0.0.1 beta19 — 修「点正在运行的应用」闪退（方案无效，被 beta20 取代）
 
 崩溃报告（`LiveContainer-2026-11-13-*.ips`）栈帧：
 

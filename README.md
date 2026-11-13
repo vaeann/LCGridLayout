@@ -105,7 +105,8 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
-- **0.0.1 beta19**：修复「点正在运行的应用导致 LiveContainer 闪退」——原生 `runApp` 在启动前会用 `bringExistingMultitaskWindowIfNeeded` 把已有窗口提到前台，宫格原来没有这一步，二次启动会让 `AppSceneViewController.setUpAppPresenter` 拿到无效 pid，`FBSSceneClientIdentity` 断言崩溃（EXC_BREAKPOINT）。现在先用 `LGRunningGuest` 判定，命中则调 `openExistingAppWindowWithDataUUID:` 提窗口并跳过启动
+- **0.0.1 beta20**：彻底修「点正在运行的应用」闪退。beta19 用 `openExistingAppWindowWithDataUUID:` 前置窗口，但它内部走的还是 `openWindow(id:value:)`，照样新建 scene、照样崩。现在改成微珠同款策略：**三路信号确认在跑（微珠 `isRunningGuest:` / LC 容器占用锁 / 直接找活着的 `AppSceneViewController`）→ 只用 `requestSceneSessionActivation:` 这个公开 API 前置，前置不了就明确提示，绝不调用任何会新建 scene 的接口**
+- **0.0.1 beta19**：修复「点正在运行的应用导致 LiveContainer 闪退」——原生 `runApp` 在启动前会用 `bringExistingMultitaskWindowIfNeeded` 把已有窗口提到前台，宫格原来没有这一步，二次启动会让 `AppSceneViewController.setUpAppPresenter` 拿到无效 pid，`FBSSceneClientIdentity` 断言崩溃（EXC_BREAKPOINT）。现在先用 `LGRunningGuest` 判定，命中则调 `openExistingAppWindowWithDataUUID:` 提窗口并跳过启动（**此方案无效，见 beta20**）
 - **0.0.1 beta18**：标题纵向 +12 → **+13**（与原生 119.333 完全重合）；修复旧宫格控制器未释放——每次 SwiftUI 重建都会多一个实例继续布局并刷日志，现在丢弃时完整 `detach`
 - **0.0.1 beta17**：标题纵向 +11 → **+12**（回拉 1pt，和原生视觉齐平）；日志改为**每次启动清空**，只保留当前会话，导出不再夹带历史版本
 - **0.0.1 beta16**：标题字体改为**直接拷贝宿主大标题的 font 对象**（字号/字重/行高完全一致，行高 39 → 37）；标题纵向下移量 +13 → **+11**（上次多拉了 2pt）

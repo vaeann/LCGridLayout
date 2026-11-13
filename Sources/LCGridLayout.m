@@ -343,6 +343,43 @@ static BOOL LGCloseGuestEntry(LGEntry *entry) {
     return ok;
 }
 
+// A live multitask window for this container shows up as an AppSceneViewController
+// whose public dataUUID matches. Finding one means the guest is up, which is exactly
+// the state where launching again crashes LiveContainer.
+static UIViewController *LGSearchForSceneVC(UIView *view, Class cls, NSString *container, NSInteger depth) {
+    if (!view || depth > 32) return nil;
+    NSInteger hops = 0;
+    for (UIResponder *r = view.nextResponder; r && hops < 16; r = r.nextResponder, hops++) {
+        if (![r isKindOfClass:UIResponder.class]) break;
+        if ([r isKindOfClass:cls]) {
+            id uuid = [r respondsToSelector:@selector(dataUUID)] ? [r valueForKey:@"dataUUID"] : nil;
+            if ([uuid isKindOfClass:NSString.class] && [uuid isEqualToString:container]) {
+                return [r isKindOfClass:UIViewController.class] ? (UIViewController *)r : nil;
+            }
+            break;   // this chain belongs to another guest; its siblings may not
+        }
+    }
+    for (UIView *sub in view.subviews) {
+        UIViewController *found = LGSearchForSceneVC(sub, cls, container, depth + 1);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static UIViewController *LGLiveSceneForContainer(NSString *container) {
+    if (container.length == 0) return nil;
+    Class cls = NSClassFromString(@"AppSceneViewController");
+    if (!cls) return nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            UIViewController *found = LGSearchForSceneVC(window, cls, container, 0);
+            if (found) return found;
+        }
+    }
+    return nil;
+}
+
 // Red disc with a white cross, drawn rather than borrowed from SF Symbols: the symbol's
 // cross is a knockout, so it goes transparent once the ring is removed.
 static UIImage *LGCloseBadgeImage(CGFloat diameter) {
@@ -605,6 +642,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgLaunchEntry:(LGEntry *)entry;
 - (BOOL)lgShouldUseMultitask:(LGEntry *)entry;
 - (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry;
+- (BOOL)lgHandleRunningGuest:(LGEntry *)entry;
 - (void)lgUpdateTabVisibility;
 - (void)lgUpdateTabVisibilityForce:(BOOL)force;
 - (NSNumber *)lgAppsTabState;
@@ -1409,32 +1447,57 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // LCUtils reads `selected` / `selectedContainer` and removes them again, so they
 // must be written immediately before the call. NO means the entry point is missing
 // and the caller should fall back to the classic URL launch.
-- (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry {
-    // Starting a second scene for a container that already has a live guest is not
-    // just redundant: AppSceneViewController then runs setUpAppPresenter with a pid
-    // that resolves to no process, and +[FBSSceneClientIdentity
-    // identityForProcessIdentity:] traps on the nil identity (EXC_BREAKPOINT, the
-    // 2026-11-13 LiveContainer crash report). Stock LC avoids this in runApp via
-    // bringExistingMultitaskWindowIfNeeded, so mirror the first half of it: raise the
-    // window that is already there instead of launching again.
-    if (LGRunningGuest(entry.container)) {
-        Class windows = NSClassFromString(@"MultitaskWindowManager");
-        SEL raise = NSSelectorFromString(@"openExistingAppWindowWithDataUUID:");
-        if (windows && [windows respondsToSelector:raise]) {
-            BOOL raised = NO;
-            @try {
-                raised = ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(windows, raise, entry.container);
-            } @catch (__unused NSException *e) { raised = NO; }
-            if (raised) {
-                LGLog([NSString stringWithFormat:@"Raised the running guest instead of relaunching (container=%@)",
-                       entry.container ?: @"(default)"]);
-                return YES;   // nothing was started; the caller logs the request line
-            }
-        }
-        // Either another LiveContainer instance owns this container, or the window
-        // only lives in the dock (not reachable from ObjC): keep the old behaviour.
-        LGLog(@"Guest already running but no window to raise; trying to launch anyway");
+// YES means a running guest was found: the caller must not start anything. The
+// window is raised with public API only (activating an existing session cannot
+// create a scene), and if that is not possible the user is told instead.
+- (BOOL)lgHandleRunningGuest:(LGEntry *)entry {
+    NSString *container = entry.container;
+    if (container.length == 0) return NO;
+
+    NSString *source = nil;
+    // ① The floating-menu tweak tracks the windows it manages, so ask it first.
+    Class orbit = NSClassFromString(@"LCOrbitMultitask");
+    SEL orbitRunning = NSSelectorFromString(@"isRunningGuest:");
+    if (orbit && [orbit respondsToSelector:orbitRunning]) {
+        NSDictionary *guest = @{@"path": entry.folder ?: @"",
+                                @"uuid": container,
+                                @"folder": entry.url.path ?: @""};
+        BOOL running = NO;
+        @try { running = ((BOOL (*)(id, SEL, id))objc_msgSend)(orbit, orbitRunning, guest); }
+        @catch (__unused NSException *e) { running = NO; }
+        if (running) source = @"orbit";
     }
+    // ② LiveContainer's own container lock — the same check the floating menu runs
+    //    before it launches anything.
+    if (!source && LGRunningGuest(container)) source = @"container-lock";
+    // ③ Look for the live scene itself, which needs no lock file and no tweak.
+    UIViewController *sceneVC = LGLiveSceneForContainer(container);
+    if (!source && !sceneVC) return NO;
+    if (!source) source = @"scene";
+
+    LGLog([NSString stringWithFormat:@"Guest already running (detected by %@); refusing to launch again (container=%@)",
+           source, container]);
+
+    BOOL raised = NO;
+    UISceneSession *session = sceneVC.view.window.windowScene.session;
+    if (session) {
+        @try {
+            [UIApplication.sharedApplication requestSceneSessionActivation:session
+                                                             userActivity:nil
+                                                                 options:nil
+                                                           errorHandler:nil];
+            raised = YES;
+        } @catch (__unused NSException *e) { raised = NO; }
+    }
+    if (!raised) {
+        [self showError:[NSString stringWithFormat:
+            @"「%@」正在运行。\n请切换到它的窗口，或先在微珠里关闭它。",
+            entry.name ?: entry.folder]];
+    }
+    return YES;
+}
+
+- (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry {
     Class utils = NSClassFromString(@"LCUtils");
     SEL selector = NSSelectorFromString(@"launchMultitaskGuestApp:completionHandler:");
     if (!utils || ![utils respondsToSelector:selector]) return NO;
@@ -1467,6 +1530,12 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 
 - (void)lgLaunchEntry:(LGEntry *)entry {
+    // Never start a guest that is already running: the new scene makes
+    // AppSceneViewController.setUpAppPresenter resolve an invalid pid and
+    // +[FBSSceneClientIdentity identityForProcessIdentity:] traps (EXC_BREAKPOINT,
+    // 2026-11-13 crash reports). This blocks the multitask and the classic path
+    // alike, which is what stock LC does too (it reports the container as in use).
+    if ([self lgHandleRunningGuest:entry]) return;
     if ([self lgShouldUseMultitask:entry]) {
         // Double taps arrive twice; LCUtils consumes the global `selected` key, so a
         // second call while the first is in flight would start the wrong app.

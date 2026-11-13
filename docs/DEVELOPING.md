@@ -114,7 +114,7 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 设置入口 | `showSettings` / `LGSheetController` | 右下角唯一悬浮按钮（齿轮）→ 分组卡片面板；`nativeMode=YES` 时只渲染「切换到宫格布局」+ 取消 |
 | 布局切换 | `handleSheetAction:` 的 `SwitchMode` / `SwitchToGrid` | 从面板底部按钮触发，不再有独立的悬浮切换按钮。**不要试图改宿主 navigationItem——SwiftUI 自绘，塞进去不显示** |
 | 图标 | `LGFastIcon` / `requestIconForEntry:` / `lgShowIcon:animated:` | 先给 bundle 里的 PNG，再淡入宿主渲染的图标；`prefetchIcons` 在 refresh 后预取，占位是中性色块而不是 `app.fill` |
-| 启动 | `didSelectItemAtIndexPath:` | `bundle-name` + `container-folder-name`（来自 `LCAppInfo.plist` 的 `LCDataUUID`）。少了容器名，LC 会拿别的 app 的容器去开，报「未能打开文件」 |
+| 启动 | `didSelectItemAtIndexPath:` → `lgLaunchEntry:` | `bundle-name` + `container-folder-name`（`LCDataUUID`，缺失时用 `LCContainers` 唯一项）。优先 `LCSharedUtils.launchToGuestAppWithURL:`，openURL 兜底；`lgContainerExists:` 先查容器目录，不存在就明说 |
 | 覆盖范围 | — | 网格只覆盖 `host.view`（= 搜索栏 + app 列表）。导航栏在 `nav.view` 上，天然不被覆盖 |
 | 背景 | `chooseBackground` / `applyBackground` / `removeBackground` | PHPicker，最长边压到 2200px 存 JPEG |
 

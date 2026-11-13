@@ -169,7 +169,21 @@ static NSArray<LGEntry *> *LGReadApps(BOOL includeHidden) {
             entry.hidden = (state == LGEntryStateHidden);
             entry.locked = [meta[@"isLocked"] boolValue];
             id container = meta[@"LCDataUUID"];
-            if ([container isKindOfClass:NSString.class] && [container length] > 0) entry.container = container;
+            if ([container isKindOfClass:NSString.class] && [container length] > 0) {
+                entry.container = container;
+            } else {
+                // Older records have no LCDataUUID. LC itself accepts an explicit
+                // container, so infer it when there is exactly one.
+                id list = meta[@"LCContainers"];
+                NSMutableArray<NSString *> *names = [NSMutableArray new];
+                if ([list isKindOfClass:NSArray.class]) {
+                    for (id item in list) {
+                        id name = [item isKindOfClass:NSDictionary.class] ? ((NSDictionary *)item)[@"folderName"] : nil;
+                        if ([name isKindOfClass:NSString.class] && [name length] > 0) [names addObject:name];
+                    }
+                }
+                if (names.count == 1) entry.container = names.firstObject;
+            }
             entry.name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: entry.folder.stringByDeletingPathExtension;
             if (![entry.name isKindOfClass:NSString.class]) entry.name = entry.folder;
             [result addObject:entry];
@@ -438,6 +452,10 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgSuppressNativeSearch:(BOOL)suppress;
 - (void)lgEnsureNavGuard;
 - (void)prefetchIcons;
+- (BOOL)lgContainerExists:(LGEntry *)entry;
+- (void)lgLaunchEntry:(LGEntry *)entry;
+- (void)lgCollapseHostSearchIfNeeded;
+- (void)lgAdoptHostDoubleTaps:(UIView *)root;
 - (void)refresh;
 @end
 
@@ -547,6 +565,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         if (now - self.lastSuppressTime > 0.5) {
             self.lastSuppressTime = now;
             [self lgSuppressNativeSearch:YES];
+            [self lgCollapseHostSearchIfNeeded];
+            [self lgAdoptHostDoubleTaps:self.navigationController.view];
         }
         [self lgEnsureNavGuard];
     }
@@ -730,6 +750,49 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         [self refresh];
         return;
     }
+    if (entry.container.length > 0 && ![self lgContainerExists:entry]) {
+        // LiveContainer's own list fails on this app too ("未能打开文件…"): the
+        // LCDataUUID points at a data container that is no longer on disk. Say so
+        // instead of letting the host throw a bare filename at the user.
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"无法启动"
+                                                                       message:[NSString stringWithFormat:
+            @"这个应用的数据容器“%@”在 LiveContainer 里已不存在。\n\nLiveContainer 的原生列表点它也会报同样的错，所以不是网格的问题。请在 LC 里给它重建容器，或重新导入这个 app。\n\n仍可点「仍然尝试」，但通常会失败。",
+            entry.container]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+        __weak typeof(self) weakSelf = self;
+        [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"仍然尝试" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf lgLaunchEntry:entry];
+        }]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    [self lgLaunchEntry:entry];
+}
+
+// Container folders live next to the app: private list under Documents/Data/
+// Application, shared list under the app group. If neither has the folder, the
+// record is stale.
+- (BOOL)lgContainerExists:(LGEntry *)entry {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *docs = [fm URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].lastObject;
+    NSMutableArray<NSURL *> *roots = [NSMutableArray arrayWithObject:
+        [[docs URLByAppendingPathComponent:@"Data/Application"] URLByAppendingPathComponent:entry.container]];
+    NSURL *group = LGGet(NSClassFromString(@"LCSharedUtils"), @"appGroupPath");
+    if (!group) group = [fm containerURLForSecurityApplicationGroupIdentifier:@"group.com.SideStore.SideStore"];
+    if (group) {
+        [roots addObject:[[[group URLByAppendingPathComponent:@"LiveContainer"]
+                           URLByAppendingPathComponent:@"Data/Application"]
+                          URLByAppendingPathComponent:entry.container]];
+    }
+    for (NSURL *url in roots) {
+        BOOL directory = NO;
+        if ([fm fileExistsAtPath:url.path isDirectory:&directory] && directory) return YES;
+    }
+    return NO;
+}
+
+- (void)lgLaunchEntry:(LGEntry *)entry {
     NSString *scheme = LGGet(NSClassFromString(@"LCUtils"), @"appUrlScheme");
     if (![scheme isKindOfClass:NSString.class] || scheme.length == 0) {
         LGLog(@"Launch refused: no native URL scheme");
@@ -741,17 +804,32 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     components.host = @"livecontainer-launch";
     NSMutableArray<NSURLQueryItem *> *items = [NSMutableArray arrayWithObject:
         [NSURLQueryItem queryItemWithName:@"bundle-name" value:entry.folder]];
-    // Pass the app's own data container. Without it LiveContainer falls back to
-    // whatever container was last selected for another app, and the guest can fail
-    // to open ("未能打开文件…") on apps whose LCDataUUID is not the global default.
     if (entry.container.length > 0) {
         [items addObject:[NSURLQueryItem queryItemWithName:@"container-folder-name" value:entry.container]];
     }
     components.queryItems = items;
     NSURL *url = components.URL;
-    LGLog([NSString stringWithFormat:@"Launching %@ (container=%@)", entry.folder, entry.container ?: @"(default)"]);
     if (!url) return;
     [self.view endEditing:YES];
+    LGLog([NSString stringWithFormat:@"Launching %@ (container=%@)", entry.folder, entry.container ?: @"(default)"]);
+
+    // Prefer the host's own entry point: same URL, but handed straight to
+    // LCSharedUtils instead of round-tripping through SpringBoard. This is what the
+    // floating-menu tweak does and it survives states where openURL is refused.
+    Class utils = NSClassFromString(@"LCSharedUtils");
+    SEL direct = NSSelectorFromString(@"launchToGuestAppWithURL:");
+    if (utils && [utils respondsToSelector:direct]) {
+        BOOL accepted = NO;
+        @try {
+            accepted = ((BOOL (*)(id, SEL, NSURL *))objc_msgSend)(utils, direct, url);
+        } @catch (__unused NSException *e) { accepted = NO; }
+        if (accepted) {
+            LGLog(@"Host launch API accepted the request");
+            return;
+        }
+        LGLog(@"Host launch API refused; falling back to openURL");
+    }
+
     [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
         LGLog(success ? @"Native launch URL accepted (guest launch outcome not asserted)" : @"Native launch URL rejected");
         if (!success) {
@@ -1146,6 +1224,46 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.navTapGuard.cancelsTouchesInView = YES;
     self.navTapGuard.delegate = self;
     [navView addGestureRecognizer:self.navTapGuard];
+    [self lgAdoptHostDoubleTaps:navView];
+}
+
+// cancelsTouchesInView only stops touch delivery, not another recognizer from
+// recognising. Making the host's own double taps wait for ours is what actually
+// keeps LiveContainer's searchable from firing.
+- (void)lgAdoptHostDoubleTaps:(UIView *)root {
+    if (!self.navTapGuard) return;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    NSUInteger visited = 0, adopted = 0;
+    while (stack.count > 0 && visited < 500) {
+        UIView *view = stack.lastObject;
+        [stack removeLastObject];
+        visited++;
+        for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
+            if (gesture == self.navTapGuard) continue;
+            if (![gesture isKindOfClass:UITapGestureRecognizer.class]) continue;
+            if (((UITapGestureRecognizer *)gesture).numberOfTapsRequired < 2) continue;
+            @try { [gesture requireGestureRecognizerToFail:self.navTapGuard]; } @catch (__unused NSException *e) { continue; }
+            adopted++;
+        }
+        [stack addObjectsFromArray:view.subviews];
+    }
+    if (adopted > 0) LGLog([NSString stringWithFormat:@"Nav guard adopted %lu host double tap(s)", (unsigned long)adopted]);
+}
+
+// Second layer: if the search UI still went active (SwiftUI can drive it without a
+// recognizer we can see), collapse it right away instead of leaving a blank sheet
+// covering the grid.
+- (void)lgCollapseHostSearchIfNeeded {
+    UINavigationController *nav = self.navigationController;
+    if (!nav) return;
+    UINavigationItem *item = nav.topViewController.navigationItem ?: self.parentViewController.navigationItem;
+    if (@available(iOS 13.0, *)) {
+        UISearchController *search = item.searchController;
+        if (search && search.isActive) {
+            search.active = NO;
+            LGLog(@"Collapsed an activated host search");
+        }
+    }
 }
 - (void)lgNavTapGuardFired:(UITapGestureRecognizer *)gesture {
     LGLog(@"Swallowed a double tap in the host navigation area");
@@ -1395,9 +1513,12 @@ __attribute__((constructor)) static void LGInitialize(void) {
             // the host page within one frame instead of one 100ms tick. It stops as
             // soon as the burst window ends; the steady 0.1s timer takes over.
             LGTick();
-            [NSTimer scheduledTimerWithTimeInterval:0.03 repeats:YES block:^(NSTimer *burstTimer) {
+            // 16ms = one frame. The native list paints once before the overlay
+            // mounts, and this burst is what shortens that flash; going lower only
+            // burns CPU, since the host view does not exist until SwiftUI builds it.
+            [NSTimer scheduledTimerWithTimeInterval:0.016 repeats:YES block:^(NSTimer *burstTimer) {
                 LGTick();
-                if (CFAbsoluteTimeGetCurrent() - LGStartTime > 1.2) [burstTimer invalidate];
+                if (CFAbsoluteTimeGetCurrent() - LGStartTime > 1.6) [burstTimer invalidate];
             }];
             [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 LGTick();

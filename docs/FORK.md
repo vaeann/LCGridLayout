@@ -29,6 +29,18 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta3 — 搜索彻底压死、启动链路对齐微珠（2026-11-13）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgAdoptHostDoubleTaps:` | 遍历导航区里的双击手势，`requireGestureRecognizerToFail:` 我们自己的守卫。`cancelsTouchesInView` 只挡触摸投递、挡不住别的识别器，这才是双击仍会唤起 LC 搜索的原因 |
+| 同上 | `lgCollapseHostSearchIfNeeded` | 兜底：若 `navigationItem.searchController.isActive` 仍为真，直接置回 NO，不留空白展开页 |
+| 同上 | `lgLaunchEntry:` | 优先调用 `LCSharedUtils.launchToGuestAppWithURL:`（进程内，和微珠一致），失败再走 `UIApplication openURL:` |
+| 同上 | `lgContainerExists:` + 启动前检查 | 数据目录 `Documents/Data/Application/<uuid>`（及 group 侧）不存在时，弹窗说明「容器不存在」，可点「仍然尝试」。LC 原生列表对这类 app 同样失败，错误文案是裸文件名 |
+| 同上 | `LGReadApps` | 没有 `LCDataUUID` 时，从 `LCContainers` 推断（仅当只有一个容器） |
+| 同上 | `LGInitialize` | 启动探针 30ms → 16ms，窗口 1.2s → 1.6s。原生列表闪一下是挂载时机，不是注入失败；不 hook `viewDidAppear` 就只能缩短，不能消除 |
+| `VERSION` | | 不变（仍 0.0.1，beta 序号自动 +1） |
+
 ## 0.0.1 beta2 — 单按钮、图标与启动修复、搜索压制（2026-11-13）
 
 四条实测反馈：布局切换按钮多余、图标首帧闪一块纯色、个别 app 点了报「未能打开文件」、

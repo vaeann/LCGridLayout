@@ -2626,10 +2626,10 @@ static void LGHaptic(UIImpactFeedbackStyle style) {
     BOOL left = [NSUserDefaults.standardUserDefaults boolForKey:LGHandleSide];
     CGFloat frac = [NSUserDefaults.standardUserDefaults doubleForKey:LGHandleY];
     if (frac <= 0 || frac >= 1) frac = 0.72;
-    CGFloat minY = safe.top + 8, maxY = bounds.height - safe.bottom - size - 8;
+    CGFloat minY = safe.top + 8, maxY = CGRectGetHeight(bounds) - safe.bottom - size - 8;
     if (maxY < minY) maxY = minY;
     CGFloat y = minY + (maxY - minY) * frac;
-    CGFloat x = left ? safe.left + 6 : bounds.width - safe.right - size - 6;
+    CGFloat x = left ? safe.left + 6 : CGRectGetWidth(bounds) - safe.right - size - 6;
     self.handle.frame = CGRectMake(x, y, size, size);
 }
 
@@ -2808,11 +2808,11 @@ static void LGHaptic(UIImpactFeedbackStyle style) {
     CGRect bounds = window.bounds;
     UIEdgeInsets safe = window.safeAreaInsets;
     CGFloat size = CGRectGetWidth(handle.bounds);
-    CGFloat minY = safe.top + 8, maxY = bounds.height - safe.bottom - size - 8;
+    CGFloat minY = safe.top + 8, maxY = CGRectGetHeight(bounds) - safe.bottom - size - 8;
     if (maxY < minY) maxY = minY;
     CGFloat y = MIN(MAX(handle.center.y, minY + size * 0.5), maxY + size * 0.5);
     CGFloat leftX = safe.left + 6 + size * 0.5;
-    CGFloat rightX = bounds.width - safe.right - size - 6 + size * 0.5;
+    CGFloat rightX = CGRectGetWidth(bounds) - safe.right - size - 6 + size * 0.5;
     BOOL toLeft = fabs(handle.center.x - leftX) < fabs(handle.center.x - rightX);
     CGFloat x = toLeft ? leftX : rightX;
     [UIView animateWithDuration:0.22

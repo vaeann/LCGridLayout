@@ -15,6 +15,7 @@ static NSString *const LGNative = @"LCGridLayout.nativeList";
 static NSString *const LGCompactTop = @"LCGridLayout.compactTop";
 static NSString *const LGOrder = @"LCGridLayout.order";
 static NSString *const LGTitleX = @"LCGridLayout.titleX";
+static NSString *const LGTitleFont = @"LCGridLayout.titleFont";
 static CFTimeInterval LGStartTime;
 
 static id LGGet(id object, NSString *selector) {
@@ -706,13 +707,26 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self.panel addSubview:self.dimView];
     self.titleLabel = [UILabel new];
     self.titleLabel.text = @"App";
-    // Explicit bold: preferredFontForTextStyle does not guarantee the nav-bar weight.
-    // Back to 34pt: the 31pt reading came from a 6.67pt-wide sub-label in the bar, not
-    // from the large title itself. Size was never different between the two layouts;
-    // only the vertical offset was.
-    UIFont *titleBase = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
-    self.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleLargeTitle] scaledFontForFont:titleBase];
-    self.titleLabel.adjustsFontForContentSizeCategory = YES;
+    // Use the font captured from the host's own large title in a previous session.
+    // Without it the first frames draw with the UIFontMetrics-scaled fallback (39pt
+    // line height) and the title visibly shrinks once the probe replaces it with the
+    // host's font (37pt) — the "title shrinks a little on launch" reported on
+    // 2026-11-13. Same story as the title x: measure once, keep forever.
+    UIFont *savedTitleFont = nil;
+    NSData *fontData = [NSUserDefaults.standardUserDefaults dataForKey:LGTitleFont];
+    if (fontData) {
+        savedTitleFont = [NSKeyedUnarchiver unarchivedObjectOfClass:UIFont.class fromData:fontData error:nil];
+    }
+    if ([savedTitleFont isKindOfClass:UIFont.class]) {
+        self.titleLabel.font = savedTitleFont;
+        self.titleLabel.adjustsFontForContentSizeCategory = NO;
+    } else {
+        // First ever launch: no measurement yet. Explicit bold, because
+        // preferredFontForTextStyle does not guarantee the nav-bar weight.
+        UIFont *titleBase = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
+        self.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleLargeTitle] scaledFontForFont:titleBase];
+        self.titleLabel.adjustsFontForContentSizeCategory = YES;
+    }
     self.titleLabel.textColor = UIColor.labelColor;
     [self.panel addSubview:self.titleLabel];
     self.search = [UISearchBar new];
@@ -969,7 +983,14 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     UILabel *label = [self lgNativeLargeTitle];
     if (!label) return self.cachedNativeTitleFrame;   // keep the last good reading
     self.cachedNativeTitleFrame = [label convertRect:label.bounds toView:self.view];
-    if (label.font && label.font.pointSize > 0) self.cachedNativeTitleFont = label.font;
+    if (label.font && label.font.pointSize > 0) {
+        self.cachedNativeTitleFont = label.font;
+        // Persist the font object too, so the next launch draws the first frame with
+        // it instead of the scaled fallback (which reads one notch bigger).
+        NSData *fontData = [NSKeyedArchiver archivedDataWithRootObject:label.font
+                                              requiringSecureCoding:NO error:nil];
+        if (fontData) [NSUserDefaults.standardUserDefaults setObject:fontData forKey:LGTitleFont];
+    }
     CGFloat hostX = CGRectGetMinX(self.cachedNativeTitleFrame);
     if (hostX > 4 && hostX < 60) {
         // Persist: the next launch starts on the measured value instead of flashing

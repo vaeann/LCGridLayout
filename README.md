@@ -105,6 +105,7 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
+- **0.0.1 beta22**：修「打开时标题先大后小缩一丢丢」——和标题位置同一个病根：挂载瞬间量不到宿主字体，第一帧用 UIFontMetrics 备胎（行高 39），量到后换宿主字体（行高 37）就肉眼可见地缩小。现在把量到的字体对象也持久化（`LCGridLayout.titleFont`），下次启动第一帧就是对的
 - **0.0.1 beta21**：①点在跑的应用从「没反应」变成**真的前置窗口**——beta20 的 `requestSceneSessionActivation:` 对已连接的 scene 会静默无效，改用微珠自己的 `orbit_activate`（它点自己列表就是这么做的，已验证）；②修标题「切到原生时往右移一丢丢」——根因是挂载瞬间探测不到宿主大标题（view 还没进 window），标题退到搜索框推出的 16pt，而宿主实际在 20pt，差 4pt；现在探测失败前 0.15s 快速重试、成功后持久化，标题从第一帧就落在实测值上
 - **0.0.1 beta20**：彻底修「点正在运行的应用」闪退。beta19 用 `openExistingAppWindowWithDataUUID:` 前置窗口，但它内部走的还是 `openWindow(id:value:)`，照样新建 scene、照样崩。现在改成微珠同款策略：**三路信号确认在跑（微珠 `isRunningGuest:` / LC 容器占用锁 / 直接找活着的 `AppSceneViewController`）→ 前置，前置不了就明确提示，绝不调用任何会新建 scene 的接口**
 - **0.0.1 beta19**：修复「点正在运行的应用导致 LiveContainer 闪退」——原生 `runApp` 在启动前会用 `bringExistingMultitaskWindowIfNeeded` 把已有窗口提到前台，宫格原来没有这一步，二次启动会让 `AppSceneViewController.setUpAppPresenter` 拿到无效 pid，`FBSSceneClientIdentity` 断言崩溃（EXC_BREAKPOINT）。现在先用 `LGRunningGuest` 判定，命中则调 `openExistingAppWindowWithDataUUID:` 提窗口并跳过启动（**此方案无效，见 beta20**）

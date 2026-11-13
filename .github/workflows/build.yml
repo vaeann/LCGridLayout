@@ -121,9 +121,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="v${{ steps.ver.outputs.version }}-build${{ github.run_number }}"
+          # Beta 阶段：tag 用 -betaN，便于和正式版区分
+          TAG="v${{ steps.ver.outputs.version }}-beta${{ github.run_number }}"
           F="dist/${{ steps.ver.outputs.dylib }}"
-          TITLE="LCGridLayout v${{ steps.ver.outputs.version }} (build ${{ github.run_number }})"
+          TITLE="LCGridLayout v${{ steps.ver.outputs.version }} beta (build ${{ github.run_number }})"
           gh release create "$TAG" "$F" dist/SHA256SUMS.txt \
             --title "$TITLE" \
             --notes-file /tmp/notes.md \

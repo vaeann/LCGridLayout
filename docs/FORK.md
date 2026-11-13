@@ -29,6 +29,20 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 版本号从 1 重新计数（2026-11-13）
+
+2026-11-13 清空了仓库里全部 Release、tag、workflow run 与 artifact，`VERSION` 归 **1**，
+从 **beta** 起步。
+
+- 产物文件名重新从 `LCGridLayout_v1.dylib` 开始
+- Release tag 形如 `v1-betaN`，标题带 `beta` 字样
+- 下文 v25–v34 的记录保留，作为上一轮迭代的历史；它们对应的构建产物已全部删除
+- 上游也有 v1（未发 Release），但日志里出现 `LCGridLayout_v1.dylib loaded`
+  只可能来自本仓库
+
+转正式版时：把 `.github/workflows/build.yml` 里 tag 的 `-beta` 去掉、模板里的
+测试版提示删掉即可。
+
 ## v30 — 手势全部移除，改为导航栏按钮（2026-11-08）
 
 用户决定：不再用手势切布局。原生 ↔ 网格统一由导航栏右侧一个按钮负责；只保留

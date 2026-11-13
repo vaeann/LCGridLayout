@@ -1,4 +1,6 @@
-# LCGridLayout v{{VERSION}} — build {{RUN}}
+# LCGridLayout v{{VERSION}} beta — build {{RUN}}
+
+> **测试版**：功能和交互仍在调整，可能随时变动。装机前确认 Tweaks 里只保留一个 `LCGridLayout*`。
 
 LiveContainer 宿主侧图标网格插件，**未签名 dylib**，需在 LiveContainer 内用当前证书重签后使用。
 

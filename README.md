@@ -105,6 +105,7 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
+- **0.0.1 beta16**：标题字体改为**直接拷贝宿主大标题的 font 对象**（字号/字重/行高完全一致，行高 39 → 37）；标题纵向下移量 +13 → **+11**（上次多拉了 2pt）
 - **0.0.1 beta15**：字号回退 34pt（beta14 误改为 31，那个 31pt 读数来自导航栏里一个 6.67pt 宽的子 label）；纵向保持 +13（日志实测 y=119.333 与原生相等）；切回 App 页不再闪——挂 `SwiftUI.UIKitTabBarController` 的 `setSelectedIndex:` / `setSelectedViewController:`，在切换的同一 runloop 内刷新可见性
 - **0.0.1 beta14**：标题字号 34 → 31、纵向下移 5pt（按日志实测宿主大标题 31pt / y=119.33 对齐，消除切换时的错落感）；切回 App 标签页不再闪一帧原生列表（layout 时强制刷新可见性并提前置顶覆盖层）；tag 改为两位补零，Releases 列表顺序恢复
 - **0.0.1 beta13**：修复切到其他标签页后宫格仍盖住页面——覆盖层在四个 tab 共享的容器里，现在按选中 tab 隐藏内容与按钮，并解除对宿主页面的冻结；标题与搜索框改为**跟随宿主实测位置**（读不到才退回 16pt），网格左右统一 16pt；测量日志改为拿到 window 之后再打，并输出导航栏全部 label

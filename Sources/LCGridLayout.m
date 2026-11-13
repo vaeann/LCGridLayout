@@ -620,6 +620,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) BOOL onAppsTab;
 @property(nonatomic) CFTimeInterval lastNativeTitleProbe;
 @property(nonatomic) CGRect cachedNativeTitleFrame;
+@property(nonatomic, strong) UIFont *cachedNativeTitleFont;
 @property(nonatomic, weak) UITabBar *cachedTabBar;
 - (void)lgCollapseHostSearchIfNeeded;
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
@@ -923,6 +924,10 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.cachedNativeTitleFrame = label
         ? [label convertRect:label.bounds toView:self.view]
         : CGRectNull;
+    // Copy the host's own font object: point size, weight and line height then match
+    // exactly, instead of approximating with a scaled 34pt bold (which measured 39pt
+    // tall against the host's 37pt).
+    if (label.font && label.font.pointSize > 0) self.cachedNativeTitleFont = label.font;
     return self.cachedNativeTitleFrame;
 }
 
@@ -965,10 +970,17 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // Title / search / grid frames. Split out so revealing the search field can animate
 // just these three without a full layout pass.
 - (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe {
+    // Probe first (once a second), then borrow the host's font before measuring the
+    // line height, so the title is the same object the native page draws.
+    [self lgNativeTitleFrame];
+    if (self.cachedNativeTitleFont) {
+        self.titleLabel.adjustsFontForContentSizeCategory = NO;
+        self.titleLabel.font = self.cachedNativeTitleFont;
+    }
     CGFloat titleHeight = ceil(self.titleLabel.font.lineHeight);
-    // +13, not +8: the host large title sits at y=119.33 with our top at 106
-    // (measured 2026-11-13), and +8 put ours 5pt higher.
-    CGFloat contentTop = top + 13 + titleHeight + 6;
+    // +11, not +13: with the host's own font the glyphs sit ~2pt higher than the
+    // copied frame suggested, and +13 read as slightly low.
+    CGFloat contentTop = top + 11 + titleHeight + 6;
     self.search.hidden = !self.searchRevealed;
     // The host list keeps everything on one 16pt vertical line: large title, search
     // field and row content all start there. UISearchBar adds its own inset inside
@@ -988,7 +1000,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         CGFloat hostX = CGRectGetMinX(hostTitle);
         if (hostX > 4 && hostX < 60) inset = hostX;
     }
-    self.titleLabel.frame = CGRectMake(inset, top + 13, MAX(0, w - inset * 2), titleHeight);
+    self.titleLabel.frame = CGRectMake(inset, top + 11, MAX(0, w - inset * 2), titleHeight);
     CGFloat headerHeight = self.searchRevealed ? 48 : 0;
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;

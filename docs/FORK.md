@@ -29,6 +29,18 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta16 — 标题直接借宿主的字体（2026-11-13）
+
+beta15 日志：两者 y 都是 119.333，但 `title` 高 **39**、`nativeTitle` 高 **37**。宽度 59.67 正好是
+34pt bold “App” 的宽度，说明字号一致，差在字体对象上——宫格用的是
+`UIFontMetrics + scaledFontForFont` 加工出来的字体。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgNativeTitleFrame` | 探测到宿主大标题时保存 `label.font` |
+| 同上 | `lgLayoutContentWithWidth` | 布局前套用该 font（并关掉 `adjustsFontForContentSizeCategory`，避免再缩放一次），行高随之从 39 变 37 |
+| 同上 | 标题纵向 | `top + 13` → **`top + 11`**：换字体后文字在 label 内上移约 1pt，加上回拉 2pt，正好抵消上次多拉的 5pt |
+
 ## 0.0.1 beta15 — 字号回退、切 tab 挂到真正的切换点（2026-11-13）
 
 beta14 两个问题：

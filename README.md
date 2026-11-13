@@ -105,6 +105,7 @@ Host gate passed: LiveContainer 3.8.11 (>= 3.8.0); LCGridLayout_v10.dylib loaded
 
 ## 变更记录
 
+- **0.0.1 beta12**：搜索栏改为 `x=8`、宽 `w-16`（文字边缘落在 16..w-16，与标题和原生搜索框对齐）；启动方式跟随 LC 设置——按 app 的 `MultitaskSpecified` 与全局 `LCLaunchInMultitaskMode` 走多任务窗口，经典模式 / 需要 JIT 的 app 仍走原路径；布局切换按钮只在 App 标签页显示
 - **0.0.1 beta11**：冷启动不再闪原生列表——改用 `viewWillAppear:` / `viewDidLayoutSubviews` 外观回调提前挂载，挂载后同步 `layoutIfNeeded`，首帧即宫格；0.1s 轮询降级为兜底
 - **0.0.1 beta10**：按原生截图对齐间距——标题与按钮行 20pt、搜索栏与首行 24pt
 - **0.0.1 beta9**：关掉 scroll view 的自动安全区补偿（标题与首行之间那 52pt），首行间距收紧到原生水平

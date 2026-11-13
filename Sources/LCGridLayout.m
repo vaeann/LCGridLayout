@@ -122,6 +122,13 @@ static NSUserDefaults *LGAppGroupDefaults(void) {
 // for this app by default. The native launch route needs it, otherwise it falls
 // back to whatever container another app had selected.
 @property(nonatomic, copy) NSString *container;
+// Launch preferences read straight from LCAppInfo.plist. LiveContainer decides
+// between "multitask window" and "classic (restart into guest)" per app, and the
+// grid has to make the same call or a user who enabled multitasking gets the old
+// behaviour for every icon.
+@property(nonatomic) NSInteger multitaskSpecified;   // 0 default / 1 no / 2 yes
+@property(nonatomic) BOOL classicMode;
+@property(nonatomic) BOOL jitNeeded;
 @property(nonatomic) BOOL locked;
 @property(nonatomic) BOOL shared;
 @property(nonatomic) BOOL hidden;
@@ -169,6 +176,9 @@ static NSArray<LGEntry *> *LGReadApps(BOOL includeHidden) {
             entry.shared = shared;
             entry.hidden = (state == LGEntryStateHidden);
             entry.locked = [meta[@"isLocked"] boolValue];
+            entry.multitaskSpecified = [meta[@"MultitaskSpecified"] integerValue];
+            entry.classicMode = [meta[@"classicMode"] boolValue];
+            entry.jitNeeded = [meta[@"isJITNeeded"] boolValue];
             id container = meta[@"LCDataUUID"];
             if ([container isKindOfClass:NSString.class] && [container length] > 0) {
                 entry.container = container;
@@ -593,6 +603,13 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)prefetchIcons;
 - (BOOL)lgContainerExists:(LGEntry *)entry;
 - (void)lgLaunchEntry:(LGEntry *)entry;
+- (BOOL)lgShouldUseMultitask:(LGEntry *)entry;
+- (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry;
+- (void)lgUpdateTabVisibility;
+- (BOOL)lgOnAppsTab;
+@property(nonatomic) CFTimeInterval lastLaunchTime;
+@property(nonatomic) CFTimeInterval lastTabCheck;
+@property(nonatomic, weak) UITabBar *cachedTabBar;
 - (void)lgCollapseHostSearchIfNeeded;
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
 - (CGFloat)lgNavButtonBottomInBar:(UIView *)bar;
@@ -763,6 +780,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // bounds, so viewDidLayoutSubviews never fires and the header keeps its old
 // offset (the big blank above the toolbar). Re-layout when that geometry moves.
 - (void)lgSyncLayout {
+    [self lgUpdateTabVisibility];
     if (!self.nativeMode) {
         // SwiftUI rebuilds the page (and its search bar) on tab switches; re-apply
         // the suppression, but only a couple of times per second — the walk covers
@@ -836,6 +854,28 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.switchButton.frame = CGRectMake(MAX(8, w - 16 - settingsWidth), MAX(0, bottomLimit - buttonHeight - 14), settingsWidth, buttonHeight);
     if (!self.nativeMode) [self lgEnsureNavGuard];
     [self lgFreezeHostContent:!self.nativeMode];
+    [self lgUpdateTabVisibility];
+}
+
+// First large-title label the host has on screen. Used once per session, to compare
+// our hand-drawn "App" against the real one while switching layouts.
+- (UILabel *)lgNativeLargeTitle {
+    UIWindow *window = self.view.window;
+    if (!window || !window.rootViewController) return nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:window.rootViewController.view];
+    NSUInteger visited = 0;
+    while (queue.count > 0 && visited < 800) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        visited++;
+        if ([view isKindOfClass:UILabel.class]) {
+            UILabel *label = (UILabel *)view;
+            if (label.font.pointSize >= 30 && label.font.pointSize <= 40 &&
+                label.text.length > 0 && !label.hidden && label.alpha > 0.05) return label;
+        }
+        for (UIView *sub in view.subviews) if (sub != self.view) [queue addObject:sub];
+    }
+    return nil;
 }
 
 // Title / search / grid frames. Split out so revealing the search field can animate
@@ -847,7 +887,11 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.titleLabel.frame = CGRectMake(16, top + 8, MAX(0, w - 32), titleHeight);
     CGFloat contentTop = top + 8 + titleHeight + 6;
     self.search.hidden = !self.searchRevealed;
-    self.search.frame = CGRectMake(4, contentTop, MAX(0, w - 8), 48);
+    // UISearchBar keeps its own 8pt inset on each side, so a bar at x=8 / w-16 puts
+    // the field itself at 16..w-16 — the same edges the host's large title and its
+    // searchable field use. A bar at x=4 made the field 4pt wider on both sides than
+    // the native one, which was visible when toggling between the two layouts.
+    self.search.frame = CGRectMake(8, contentTop, MAX(0, w - 16), 48);
     CGFloat headerHeight = self.searchRevealed ? 48 : 0;
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
@@ -859,9 +903,56 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     static BOOL loggedLayout = NO;
     if (!loggedLayout) {
         loggedLayout = YES;
-        LGLog([NSString stringWithFormat:@"Layout top=%.0f title=%@ grid=%@ inset=%.0f",
-               top, NSStringFromCGRect(self.titleLabel.frame), NSStringFromCGRect(frame),
+        UILabel *nativeTitle = [self lgNativeLargeTitle];
+        NSString *nativeFrame = nativeTitle
+            ? NSStringFromCGRect([nativeTitle convertRect:nativeTitle.bounds toView:self.view])
+            : @"(none)";
+        LGLog([NSString stringWithFormat:@"Layout top=%.0f title=%@ nativeTitle=%@ grid=%@ inset=%.0f",
+               top, NSStringFromCGRect(self.titleLabel.frame), nativeFrame, NSStringFromCGRect(frame),
                self.collection.adjustedContentInset.top]);
+    }
+}
+
+- (UITabBar *)lgTabBarIn:(UIView *)root {
+    if (!root) return nil;
+    if ([root isKindOfClass:UITabBar.class]) return (UITabBar *)root;
+    for (UIView *sub in root.subviews) {
+        UITabBar *found = [self lgTabBarIn:sub];
+        if (found) return found;
+    }
+    return nil;
+}
+
+// LiveContainer's shell is a single SwiftUI TabView (LCTabView), so the overlay sits
+// in the container shared by all four tabs. The switch button belongs to the Apps
+// tab only; the others are host pages the grid has nothing to say about.
+- (BOOL)lgOnAppsTab {
+    UITabBar *bar = self.cachedTabBar;
+    if (!bar || !bar.window) {
+        bar = [self lgTabBarIn:self.view.window];
+        self.cachedTabBar = bar;
+    }
+    if (!bar || !bar.selectedItem) return YES;   // Unknown shell: keep the old behaviour
+    NSBundle *bundle = LGGet(NSUserDefaults.class, @"lcMainBundle");
+    // Empty fallback: if the host bundle cannot resolve the key, hide nothing rather
+    // than leaving the button invisible on every tab.
+    NSString *apps = [bundle localizedStringForKey:@"lc.tabView.apps" value:@"" table:nil];
+    if (apps.length == 0) return YES;
+    return [bar.selectedItem.title isEqualToString:apps];
+}
+
+- (void)lgUpdateTabVisibility {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - self.lastTabCheck < 0.3) return;
+    self.lastTabCheck = now;
+    BOOL onApps = [self lgOnAppsTab];
+    self.switchButton.hidden = !onApps;
+    // Log on change only: the check runs a few times a second.
+    static NSInteger lastOnApps = -1;
+    if ((NSInteger)onApps != lastOnApps) {
+        lastOnApps = (NSInteger)onApps;
+        LGLog([NSString stringWithFormat:@"Apps tab active=%d (selected=%@)",
+               onApps, self.cachedTabBar.selectedItem.title ?: @"?"]);
     }
 }
 
@@ -1087,7 +1178,70 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     return NO;
 }
 
+// LiveContainer picks the launch route per app: a multitask window when that app (or
+// the global default) asks for it, a classic restart into the guest otherwise.
+// Mirrors LCAppModel.shouldLaunchInMultitaskMode, so the grid does not silently
+// disable a setting the user turned on.
+- (BOOL)lgShouldUseMultitask:(LGEntry *)entry {
+    if (entry.classicMode || entry.jitNeeded) return NO;
+    if (entry.multitaskSpecified == 1) return NO;
+    if (@available(iOS 16.0, *)) {
+        if (entry.multitaskSpecified == 2) return YES;
+        return [NSUserDefaults.standardUserDefaults boolForKey:@"LCLaunchInMultitaskMode"];
+    }
+    return NO;
+}
+
+// LCUtils reads `selected` / `selectedContainer` and removes them again, so they
+// must be written immediately before the call. NO means the entry point is missing
+// and the caller should fall back to the classic URL launch.
+- (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry {
+    Class utils = NSClassFromString(@"LCUtils");
+    SEL selector = NSSelectorFromString(@"launchMultitaskGuestApp:completionHandler:");
+    if (!utils || ![utils respondsToSelector:selector]) return NO;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setObject:entry.folder forKey:@"selected"];
+    if (entry.container.length > 0) {
+        [defaults setObject:entry.container forKey:@"selectedContainer"];
+    } else {
+        [defaults removeObjectForKey:@"selectedContainer"];
+    }
+    __weak typeof(self) weakSelf = self;
+    void (^completion)(NSNumber *, NSError *) = ^(NSNumber *pid, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                LGLog([NSString stringWithFormat:@"Multitask launch failed: %@", error.localizedDescription]);
+                [weakSelf showError:[NSString stringWithFormat:
+                    @"多任务启动失败：%@\n\n可以再点一次，或改用原生列表启动。", error.localizedDescription]];
+                return;
+            }
+            LGLog([NSString stringWithFormat:@"Multitask launch accepted (pid=%@)", pid]);
+            [weakSelf lgRefreshRunningBadges];
+        });
+    };
+    @try {
+        ((void (*)(id, SEL, NSString *, void (^)(NSNumber *, NSError *)))objc_msgSend)(utils, selector, entry.name ?: entry.folder, completion);
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+    return YES;
+}
+
 - (void)lgLaunchEntry:(LGEntry *)entry {
+    if ([self lgShouldUseMultitask:entry]) {
+        // Double taps arrive twice; LCUtils consumes the global `selected` key, so a
+        // second call while the first is in flight would start the wrong app.
+        CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+        if (now - self.lastLaunchTime < 1.0) return;
+        self.lastLaunchTime = now;
+        [self.view endEditing:YES];
+        if ([self lgLaunchMultitaskEntry:entry]) {
+            LGLog([NSString stringWithFormat:@"Launching %@ via=multitask spec=%ld jit=%d",
+                   entry.folder, (long)entry.multitaskSpecified, entry.jitNeeded]);
+            return;
+        }
+        LGLog(@"Multitask entry point unavailable; falling back to classic launch");
+    }
     NSString *scheme = LGGet(NSClassFromString(@"LCUtils"), @"appUrlScheme");
     if (![scheme isKindOfClass:NSString.class] || scheme.length == 0) {
         LGLog(@"Launch refused: no native URL scheme");

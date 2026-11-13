@@ -29,6 +29,17 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta12 — 搜索栏对齐、跟随多任务设置、按钮限定 App 页（2026-11-13）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgLayoutContentWithWidth` | 搜索栏 `x=4 / w-8` → `x=8 / w-16`。UISearchBar 自带左右 8pt 内边距，改后文字边缘为 16..w-16，与标题、与宿主 `.searchable` 搜索框三线重合 |
+| 同上 | `LGEntry` + `LGReadApps` | 新增 `multitaskSpecified` / `classicMode` / `jitNeeded`，从 `LCAppInfo.plist` 读取 |
+| 同上 | `lgShouldUseMultitask:` | 复刻 `LCAppModel.shouldLaunchInMultitaskMode`：经典模式、需要 JIT、`spec=1` 一律否；`spec=2` 是；`spec=0` 看全局 `LCLaunchInMultitaskMode` |
+| 同上 | `lgLaunchMultitaskEntry:` | 写 `selected` / `selectedContainer` 后调 `+[LCUtils launchMultitaskGuestApp:completionHandler:]`；接口缺失时返回 NO，调用方回退经典 URL 启动 |
+| 同上 | `lgLaunchEntry:` | 先试多任务，失败回退；1s 节流只作用于多任务分支（`LCUtils` 会消费全局 `selected`，连点会串台） |
+| 同上 | `lgOnAppsTab` / `lgUpdateTabVisibility` | LC 是单个 SwiftUI `TabView`，四个 tab 共用一个宿主，覆盖层会浮在全部页面上。读 `UITabBar.selectedItem.title` 与本地化 `lc.tabView.apps` 比对，只在 Apps tab 显示切换按钮 |
+
 ## 0.0.1 beta11 — 冷启动不再闪原生列表（2026-11-13）
 
 现象：宫格模式持久化后，冷启动仍会看到一帧原生列表再变宫格。日志显示挂载发生在

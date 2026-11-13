@@ -29,6 +29,35 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta19 — 修「点正在运行的应用」闪退（2026-11-13）
+
+崩溃报告（`LiveContainer-2026-11-13-*.ips`）栈帧：
+
+```
+EXC_BREAKPOINT / SIGTRAP，主队列，启动后 11 秒
++[FBSSceneClientIdentity identityForProcessIdentity:].cold.1   ← FBS 断言失败分支
+-[_UISceneHostingControllerAdvancedConfiguration initWithProcessIdentity:]
+-[AppSceneViewController setUpAppPresenter]                     ← AppSceneViewController.m:151
+PresenterReady
+```
+
+`setUpAppPresenter` 用 `RBSProcessPredicate predicateMatchingIdentifier:@(self.pid)` 找进程，
+第二次启动同一容器时这个 pid 解析不到活进程，`processHandle.identity` 为 nil，FBS 直接 trap。
+`@try/@catch` 拦不住信号级崩溃，所以日志里连 `Launching … via=multitask` 都没有。
+
+原生为什么不会崩：`LCAppModel.runApp`（`LCAppModel.swift:238-244`）在启动前先调
+`bringExistingMultitaskWindowIfNeeded`（同文件 519-537 行）：`openExistingAppWindow(dataUUID:)`
+→ `openWindow(id:"appView", value: a.key)` 激活已有 scene；否则 `MultitaskDockManager
+.bringMultitaskViewToFront(uuid:)`。命中即 `return`，绝不二次启动。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgLaunchMultitaskEntry:` 开头 | 新增短路：`LGRunningGuest(entry.container)` 为真时先调 `+[MultitaskWindowManager openExistingAppWindowWithDataUUID:]`，返回 YES 就记日志并跳过启动 |
+| 同上 | 兜底 | 窗口不存在（容器被别的 LC 实例占用，或窗口只在坞里）时保持原行为照旧启动，不静默失败 |
+
+已知限制：`MultitaskDockManager.bringMultitaskViewToFront` 没标 `@objc`，ObjC 侧取不到，
+所以「坞里已最小化」这一路仍可能复现，需要时再想办法（或让 LC 官方补 `@objc`）。
+
 ## 0.0.1 beta18 — 标题落回 119.333、回收旧覆盖层（2026-11-13）
 
 beta17 日志：`title={{20, 118.333}, {390, 37}}` vs `nativeTitle={{20, 119.333}, {59.67, 37}}`

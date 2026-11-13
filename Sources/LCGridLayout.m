@@ -1410,6 +1410,31 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // must be written immediately before the call. NO means the entry point is missing
 // and the caller should fall back to the classic URL launch.
 - (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry {
+    // Starting a second scene for a container that already has a live guest is not
+    // just redundant: AppSceneViewController then runs setUpAppPresenter with a pid
+    // that resolves to no process, and +[FBSSceneClientIdentity
+    // identityForProcessIdentity:] traps on the nil identity (EXC_BREAKPOINT, the
+    // 2026-11-13 LiveContainer crash report). Stock LC avoids this in runApp via
+    // bringExistingMultitaskWindowIfNeeded, so mirror the first half of it: raise the
+    // window that is already there instead of launching again.
+    if (LGRunningGuest(entry.container)) {
+        Class windows = NSClassFromString(@"MultitaskWindowManager");
+        SEL raise = NSSelectorFromString(@"openExistingAppWindowWithDataUUID:");
+        if (windows && [windows respondsToSelector:raise]) {
+            BOOL raised = NO;
+            @try {
+                raised = ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(windows, raise, entry.container);
+            } @catch (__unused NSException *e) { raised = NO; }
+            if (raised) {
+                LGLog([NSString stringWithFormat:@"Raised the running guest instead of relaunching (container=%@)",
+                       entry.container ?: @"(default)"]);
+                return YES;   // nothing was started; the caller logs the request line
+            }
+        }
+        // Either another LiveContainer instance owns this container, or the window
+        // only lives in the dock (not reachable from ObjC): keep the old behaviour.
+        LGLog(@"Guest already running but no window to raise; trying to launch anyway");
+    }
     Class utils = NSClassFromString(@"LCUtils");
     SEL selector = NSSelectorFromString(@"launchMultitaskGuestApp:completionHandler:");
     if (!utils || ![utils respondsToSelector:selector]) return NO;

@@ -654,10 +654,13 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     UICollectionViewFlowLayout *layout = [UICollectionViewFlowLayout new];
     layout.minimumInteritemSpacing = 0;
     layout.minimumLineSpacing = 16;
-    layout.sectionInset = UIEdgeInsetsMake(12, 12, 28, 12);
+    layout.sectionInset = UIEdgeInsetsMake(4, 12, 28, 12);
     self.collection = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
     self.collection.backgroundColor = UIColor.clearColor;
     self.collection.alwaysBounceVertical = YES;
+    // We position the grid ourselves; UIKit's automatic safe-area inset added another
+    // ~52pt above the first row (our view lives inside a large-safe-area host).
+    self.collection.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     self.collection.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     self.collection.dataSource = self;
     self.collection.delegate = self;
@@ -839,7 +842,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     // 16pt inset and an 8pt gap under the bar are what the host's large title looks
     // like in the native page.
     self.titleLabel.frame = CGRectMake(16, top + 8, MAX(0, w - 32), titleHeight);
-    CGFloat contentTop = top + 8 + titleHeight + 8;
+    CGFloat contentTop = top + 8 + titleHeight + 6;
     self.search.hidden = !self.searchRevealed;
     self.search.frame = CGRectMake(4, contentTop, MAX(0, w - 8), 48);
     CGFloat headerHeight = self.searchRevealed ? 48 : 0;
@@ -850,6 +853,13 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
+    static BOOL loggedLayout = NO;
+    if (!loggedLayout) {
+        loggedLayout = YES;
+        LGLog([NSString stringWithFormat:@"Layout top=%.0f title=%@ grid=%@ inset=%.0f",
+               top, NSStringFromCGRect(self.titleLabel.frame), NSStringFromCGRect(frame),
+               self.collection.adjustedContentInset.top]);
+    }
 }
 
 - (void)setSearchRevealed:(BOOL)revealed animated:(BOOL)animated {

@@ -29,6 +29,21 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta9 — 关掉自动安全区补偿，收紧首行间距（2026-11-13）
+
+beta8 顶部锚点正确了（标题紧贴按钮行），但标题与第一行图标之间多出约 52pt。
+
+原因是 `UICollectionView` 的 `contentInsetAdjustmentBehavior` 默认 `.automatic`：
+我们的视图挂在 safeArea 很大的宿主里，UIKit 自动补了一次顶部安全区，相当于又加了一条
+大标题的高度。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `loadView` | `collection.contentInsetAdjustmentBehavior = .never`（布局我们自己控制） |
+| 同上 | `lgLayoutContentWithWidth:` | 标题与网格间距 8 → 6；`sectionInset.top` 12 → 4，贴近原生首行位置 |
+| 同上 | 同上 | 加一次性日志 `Layout top=… title=… grid=… inset=…` 便于核对 |
+| `VERSION` | | 不变（0.0.1） |
+
 ## 0.0.1 beta8 — 顶部锚点改用按钮行（2026-11-13）
 
 beta7 扫描 `UINavigationBar` 子视图找「高度 38–52 的一行」，在 iOS 26 的新层级里没命中，

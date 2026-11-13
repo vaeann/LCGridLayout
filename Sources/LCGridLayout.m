@@ -567,6 +567,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // grid is not on screen, only the switch back matters.
 @property(nonatomic) BOOL nativeMode;
 @property(nonatomic, copy) void (^handler)(LGSheetAction action);
+// 清理日志按钮：文案实时带日志大小（"清理日志 90KB"），清理后立即刷新。
+@property(nonatomic, strong) UIButton *clearLogButton;
 - (UIView *)headerView;
 - (void)buildNativeBranchInRoot:(UIStackView *)root;
 - (UIView *)rowWithTitle:(NSString *)title control:(UIView *)control;
@@ -2545,6 +2547,11 @@ static void LGHaptic(UIImpactFeedbackStyle style) {
     if (!self.window) return;
     CGRect bounds = scene.coordinateSpace.bounds;
     if (!CGRectEqualToRect(self.window.frame, bounds)) self.window.frame = bounds;
+    // The first lgApplyPosition can land before the window lays out (safeAreaInsets
+    // still 0). A successfully applied frame always sits at x>=6 / y>=8, so "still at
+    // the exact origin" uniquely means "never applied" — retry until it sticks.
+    CGPoint origin = self.handle.frame.origin;
+    if (self.handle.superview && origin.x <= 1 && origin.y <= 1) [self lgApplyPosition];
     // 圆点状态低频刷新：有在跑的任务 → 绿色呼吸；没有 → 灰色常亮。
     if (now - self.lastDotRefresh >= 0.5) {
         self.lastDotRefresh = now;
@@ -2575,6 +2582,10 @@ static void LGHaptic(UIImpactFeedbackStyle style) {
 - (UIView *)lgBuildHandle {
     CGFloat size = 50;
     UIView *handle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, size, size)];
+    // Must be tracked on self: lgApplyPosition / handlePan / lgSnapAndSave all key
+    // off self.handle. beta01 left it nil, so the handle froze at (0,0) — top-left,
+    // immovable.
+    self.handle = handle;
     handle.layer.cornerRadius = size * 0.5;
     handle.layer.shadowColor = UIColor.blackColor.CGColor;
     handle.layer.shadowOpacity = 0.25;
@@ -3091,7 +3102,7 @@ __attribute__((constructor)) static void LGInitialize(void) {
     // Plain row on the sheet background: no card, no separator, no shadow. It reads as
     // a secondary action, which is what it is.
     UIButton *log = [UIButton buttonWithType:UIButtonTypeSystem];
-    [log setTitle:@"导出调试日志" forState:UIControlStateNormal];
+    [log setTitle:@"导出日志" forState:UIControlStateNormal];
     log.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     log.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     [log addTarget:self action:@selector(exportTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -3105,7 +3116,27 @@ __attribute__((constructor)) static void LGInitialize(void) {
         [log.centerYAnchor constraintEqualToAnchor:logRow.centerYAnchor],
     ]];
     [root addArrangedSubview:logRow];
-    [root setCustomSpacing:20 afterView:logRow];
+    [root setCustomSpacing:0 afterView:logRow];
+
+    // 清理日志：文案实时带当前大小（"清理日志 90KB"），点一下清空并立即刷新，
+    // 方便反复清理历史日志来测试问题。清空不是删除：文件保留，导出按钮照常可用。
+    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+    clear.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    clear.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    [clear addTarget:self action:@selector(clearLogTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.clearLogButton = clear;
+    UIView *clearRow = [UIView new];
+    clear.translatesAutoresizingMaskIntoConstraints = NO;
+    [clearRow addSubview:clear];
+    [NSLayoutConstraint activateConstraints:@[
+        [clearRow.heightAnchor constraintEqualToConstant:52],
+        [clear.leadingAnchor constraintEqualToAnchor:clearRow.leadingAnchor constant:16],
+        [clear.trailingAnchor constraintEqualToAnchor:clearRow.trailingAnchor],
+        [clear.centerYAnchor constraintEqualToAnchor:clearRow.centerYAnchor],
+    ]];
+    [root addArrangedSubview:clearRow];
+    [self refreshClearLogButton];
+    [root setCustomSpacing:20 afterView:clearRow];
 
     UIButton *switchMode = [UIButton buttonWithType:UIButtonTypeSystem];
     UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
@@ -3246,6 +3277,25 @@ __attribute__((constructor)) static void LGInitialize(void) {
 - (void)chooseTapped { [self fire:LGSheetActionChooseBackground dismiss:YES]; }
 - (void)removeTapped { [self fire:LGSheetActionRemoveBackground dismiss:YES]; }
 - (void)exportTapped { [self fire:LGSheetActionExportLog dismiss:YES]; }
+
+- (NSString *)logSizeText {
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:LGLogPath() error:nil];
+    unsigned long long bytes = attrs ? [attrs fileSize] : 0;
+    return [NSString stringWithFormat:@"%.0fKB", (double)bytes / 1024.0];
+}
+- (void)refreshClearLogButton {
+    [self.clearLogButton setTitle:[NSString stringWithFormat:@"清理日志 %@", [self logSizeText]]
+                         forState:UIControlStateNormal];
+}
+- (void)clearLogTapped {
+    // Overwrite with a one-line stamp instead of deleting: the file stays around so
+    // export keeps working, and the stamp records when it was cleared. LGLog opens a
+    // fresh handle per write, so nothing else can hold a stale descriptor.
+    NSString *stamp = [NSString stringWithFormat:@"%@ pid=%d log cleared\n", NSDate.date, getpid()];
+    [stamp writeToURL:[NSURL fileURLWithPath:LGLogPath()] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [self refreshClearLogButton];
+}
+
 - (void)switchTapped {
     [self fire:(self.nativeMode ? LGSheetActionSwitchToGrid : LGSheetActionSwitchMode) dismiss:YES];
 }

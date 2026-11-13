@@ -147,10 +147,8 @@ def check_version(errors: list[str]) -> None:
         errors.append("VERSION: 文件缺失，build.sh 会拒绝构建")
         return
     raw = VERSION_FILE.read_text(encoding="utf-8").strip()
-    if not re.fullmatch(r"[0-9]+", raw):
-        errors.append(f"VERSION: 必须是纯数字（当前 '{raw}'），它会拼进 dylib 文件名")
-    elif int(raw) < 1:
-        errors.append(f"VERSION: 必须 >= 1（当前 {raw}）")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", raw):
+        errors.append(f"VERSION: 必须是 主.次.修订 三段数字（当前 '{raw}'），它会拼进 dylib 文件名")
 
 
 # 硬编码绝对路径在设备上必然失效；广告 / 兜底占位符不该进产物。

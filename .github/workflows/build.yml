@@ -68,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
           V="$(tr -d '[:space:]' < VERSION)"
-          [[ "$V" =~ ^[0-9]+$ ]] || { echo "::error::VERSION 必须是纯数字，实际是 '$V'"; exit 1; }
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION 必须是 主.次.修订 三段数字，实际是 '$V'"; exit 1; }
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "dylib=LCGridLayout_v${V}.dylib" >> "$GITHUB_OUTPUT"
           echo "构建目标：LCGridLayout_v${V}.dylib"

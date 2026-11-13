@@ -208,17 +208,6 @@ static BOOL LGIsSearchField(UIView *view) {
     NSString *name = NSStringFromClass(view.class);
     return [name containsString:@"SearchField"] || [name containsString:@"SearchBar"];
 }
-// Same walk, but collecting the views themselves so they can be suppressed and
-// later restored. Deliberately ignores hidden/alpha, otherwise a suppressed bar
-// could never be found again.
-static void LGCollectSearchBars(UIView *view, UIView *skip, NSMutableArray<UIView *> *result) {
-    if (!view || view == skip) return;
-    if (LGIsSearchField(view) && view.window) {
-        [result addObject:view];
-        return;
-    }
-    for (UIView *sub in view.subviews) LGCollectSearchBars(sub, skip, result);
-}
 static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSValue *> *result) {
     if (!view || view == skip || view.hidden || view.alpha < 0.01) return;
     if (LGIsSearchField(view) && view.window) {
@@ -305,9 +294,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     LGSheetActionSwitchMode,
 };
 
-// Card layout instead of the long, thin alert action sheet the settings used to
-// be. Purely presentational: it reports which control was used and the grid
-// controller decides what to change.
+// Grouped card layout instead of a tall action sheet: every setting is one row
+// in a rounded card, with segmented controls and switches as the input.
 @interface LGSheetController : UIViewController
 @property(nonatomic, copy) NSString *summary;
 @property(nonatomic) NSInteger columns;
@@ -323,9 +311,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic, strong) UIView *dimView;
 @property(nonatomic, strong) UICollectionView *collection;
 @property(nonatomic, strong) UISearchBar *search;
-// Floating layout switch. Lives on our own full-screen view, so it works in
-// both modes and never depends on the host reconstructing its toolbar.
 @property(nonatomic, strong) UIButton *returnButton;
+@property(nonatomic, strong) UIButton *settingsButton;
 @property(nonatomic, strong) UILabel *empty;
 @property(nonatomic, strong) NSArray<LGEntry *> *entries;
 @property(nonatomic, strong) NSArray<LGEntry *> *filtered;
@@ -346,15 +333,12 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) CGFloat lastTopInset;
 @property(nonatomic) UIEdgeInsets lastSafeInsets;
 @property(nonatomic, strong) NSMutableSet<NSString *> *pendingIcons;
-// LiveContainer search bars we faded out in grid mode, kept for restoration.
-@property(nonatomic, strong) NSHashTable<UIView *> *suppressedSearchViews;
 @property(nonatomic, strong) id nativeSearchObserver;
 - (CGFloat)lgTopInset;
 - (void)lgSyncLayout;
+- (void)lgUpdateSwitchButton;
+- (void)toggleMode;
 - (void)refresh;
-- (void)lgSuppressNativeSearch:(BOOL)suppress;
-- (void)lgUpdateReturnButton;
-- (void)handleSheetAction:(LGSheetAction)action;
 @end
 
 @implementation LGGridController
@@ -364,7 +348,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.icons = [NSCache new];
     self.icons.countLimit = 150;
     self.pendingIcons = [NSMutableSet new];
-    self.suppressedSearchViews = [NSHashTable weakObjectsHashTable];
     self.entries = @[];
     self.filtered = @[];
     self.panel = [UIView new];
@@ -383,9 +366,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.dimView.userInteractionEnabled = NO;
     self.dimView.hidden = YES;
     [self.panel addSubview:self.dimView];
-    // The top toolbar (back-to-native / grid settings) is intentionally gone:
-    // both entries now live behind a long press on empty space, so the grid
-    // starts right below the navigation bar.
     self.search = [UISearchBar new];
     self.search.searchBarStyle = UISearchBarStyleMinimal;
     self.search.placeholder = @"搜索应用";
@@ -412,19 +392,26 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.empty.textAlignment = NSTextAlignmentCenter;
     self.collection.backgroundView = self.empty;
     [self.panel addSubview:self.collection];
-    self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-    self.longPress.minimumPressDuration = 0.3;
-    [self.panel addGestureRecognizer:self.longPress];
+    // Bottom-right pair: layout switch + settings. Both are capsules with the
+    // same fill; the switch carries text, settings is icon-only.
+    UIButtonConfiguration *switchConfig = [UIButtonConfiguration filledButtonConfiguration];
+    switchConfig.imagePadding = 6;
+    switchConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
     self.returnButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    // Same styling as the upstream "back to grid" button: a filled capsule.
-    // (A secondarySystemBackground fill looked invisible against the grouped
-    // background it sits on — same grey, no contrast.)
-    UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-    config.imagePadding = 8;
-    self.returnButton.configuration = config;
+    self.returnButton.configuration = switchConfig;
     [self.returnButton addTarget:self action:@selector(toggleMode) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.returnButton];
+    UIButtonConfiguration *gearConfig = [UIButtonConfiguration filledButtonConfiguration];
+    gearConfig.image = [UIImage systemImageNamed:@"gearshape.fill"];
+    gearConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    self.settingsButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.settingsButton.configuration = gearConfig;
+    self.settingsButton.accessibilityLabel = @"网格设置";
+    [self.settingsButton addTarget:self action:@selector(showSettings) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.settingsButton];
+    self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+    self.longPress.minimumPressDuration = 0.3;
+    [self.collection addGestureRecognizer:self.longPress];
     self.footer = [UILabel new];
     self.footer.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     self.footer.textColor = UIColor.secondaryLabelColor;
@@ -459,9 +446,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // bounds, so viewDidLayoutSubviews never fires and the header keeps its old
 // offset (the big blank above the toolbar). Re-layout when that geometry moves.
 - (void)lgSyncLayout {
-    // SwiftUI rebuilds the page (and its search bar) on tab switches; re-apply
-    // the fade so the entry point never comes back while the grid is showing.
-    if (!self.nativeMode) [self lgSuppressNativeSearch:YES];
     CGFloat top = [self lgTopInset];
     UIEdgeInsets safe = self.view.safeAreaInsets;
     BOOL hasNativeSearch = !CGRectIsEmpty([self lgTopNativeSearchFrame]);
@@ -487,68 +471,67 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    // The overlay view itself stays full-bleed so touches outside the panel still
-    // pass through (LGPassView), but the panel starts below the navigation bar:
-    // the host's buttons and "App" large title must stay visible and untouched.
+    // The overlay covers the whole host view (so nothing leaks through the
+    // translucent tab bar); interactive content stays inside the safe area.
     UIEdgeInsets safe = self.view.safeAreaInsets;
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    BOOL navHidden = self.navigationController.isNavigationBarHidden;
-    CGRect nativeSearch = navHidden ? CGRectZero : [self lgTopNativeSearchFrame];
+    CGRect nativeSearch = [self lgTopNativeSearchFrame];
     BOOL hasNativeTopSearch = !CGRectIsEmpty(nativeSearch);
     self.search.hidden = hasNativeTopSearch;
     CGFloat top = [self lgTopInset] + 2;
-    // Tight means "flush under the bar"; loose adds breathing room. The old -44
-    // (which cancelled the large-title inset) no longer applies now that the
-    // title is visible — it pushed the search field up behind the bar.
-    if (!hasNativeTopSearch && !navHidden && ![NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top += 24;
+    // Compact mode removes the phantom large-title inset, but only when there is
+    // no native search field to sit below.
+    if (!hasNativeTopSearch && [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top = MAX(0, top - 44);
     if (hasNativeTopSearch) top = MAX(top, CGRectGetMaxY(nativeSearch) + 4);
     self.lastTopInset = [self lgTopInset];
     self.lastSafeInsets = safe;
     self.hadNativeTopSearch = hasNativeTopSearch;
-    CGFloat panelHeight = MAX(0, h - top);
-    self.panel.frame = CGRectMake(0, top, w, panelHeight);
+    self.panel.frame = self.view.bounds;
     self.backgroundView.frame = self.panel.bounds;
     self.dimView.frame = self.panel.bounds;
-    // Everything below is in panel coordinates.
-    self.search.frame = CGRectMake(4, 0, MAX(0,w-8), 48);
+    self.search.frame = CGRectMake(4, top, MAX(0,w-8), 48);
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
-    self.footer.frame = CGRectMake(0, MAX(0, panelHeight-safe.bottom-footerHeight-footerGap), w, footerHeight);
+    self.footer.frame = CGRectMake(0, MAX(0, h-safe.bottom-footerHeight-footerGap), w, footerHeight);
     CGFloat headerHeight = hasNativeTopSearch ? 8 : 48;
-    CGRect frame = CGRectMake(0, headerHeight, w, MAX(0, panelHeight-headerHeight-safe.bottom-footerHeight-footerGap-2));
+    CGRect frame = CGRectMake(0, top+headerHeight, w, MAX(0, h-top-headerHeight-safe.bottom-footerHeight-footerGap-2));
     BOOL resized = !CGSizeEqualToSize(self.collection.bounds.size, frame.size);
     self.collection.frame = frame;
-    // Floating switch. edgesForExtendedLayout makes our view full-height, so
-    // h - safeArea.bottom still lands *inside* the tab bar; the button ended up
-    // 39 of its 44 points underneath it. Clamp to the real tab bar top instead.
+    // Both buttons sit just above the tab bar. safeAreaInsets.bottom is the tab
+    // bar's own inset, so clamp to its real top edge instead.
     CGFloat bottomLimit = h - safe.bottom;
-    CGRect tabFrame = CGRectZero;
     UITabBar *tabBar = self.tabBarController.tabBar;
     if (tabBar && !tabBar.hidden && tabBar.window) {
-        tabFrame = [tabBar convertRect:tabBar.bounds toView:self.view];
+        CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:self.view];
         if (!CGRectIsEmpty(tabFrame)) bottomLimit = MIN(bottomLimit, CGRectGetMinY(tabFrame));
     }
-    self.returnButton.frame = CGRectMake(MAX(8, w-150), MAX(0, bottomLimit-44-14), 138, 44);
-    static BOOL loggedSwitchButton = NO;
-    if (!loggedSwitchButton) {
-        loggedSwitchButton = YES;
-        LGLog([NSString stringWithFormat:@"Switch button frame=%@ title=%@ inWindow=%d h=%.0f safe.b=%.0f tab=%@",
-               NSStringFromCGRect(self.returnButton.frame),
-               self.returnButton.configuration.title ?: @"(nil)",
-               self.returnButton.window != nil,
-               h, safe.bottom, NSStringFromCGRect(tabFrame)]);
-    }
+    CGFloat buttonHeight = 44, buttonGap = 10, settingsWidth = 44, switchWidth = 132;
+    CGFloat buttonY = MAX(0, bottomLimit - buttonHeight - 14);
+    CGFloat settingsX = MAX(8, w - 16 - settingsWidth);
+    self.settingsButton.frame = CGRectMake(settingsX, buttonY, settingsWidth, buttonHeight);
+    self.returnButton.frame = CGRectMake(MAX(8, settingsX - buttonGap - switchWidth), buttonY, switchWidth, buttonHeight);
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
-    // The host navigation bar (buttons and large title) stays visible on purpose:
-    // the grid only replaces the search field and the app list below it.
-    [self lgSuppressNativeSearch:!self.nativeMode];
-    [self lgUpdateReturnButton];
+    [self lgUpdateSwitchButton];
     [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
-
+- (void)lgUpdateSwitchButton {
+    UIButtonConfiguration *config = self.returnButton.configuration;
+    BOOL toNative = !self.nativeMode;
+    config.title = toNative ? @"原生布局" : @"宫格布局";
+    config.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.3x3.fill")];
+    self.returnButton.configuration = config;   // struct: reassign to apply
+    self.returnButton.accessibilityLabel = toNative ? @"切换到原生布局" : @"切换到宫格布局";
+}
+- (void)toggleMode {
+    if (self.nativeMode) {
+        [self showGrid];
+    } else {
+        [self showNative];
+    }
+}
 - (void)showNative { [self.view endEditing:YES]; self.nativeMode = YES; [self applyMode]; }
 - (void)showGrid { self.nativeMode = NO; [self applyMode]; [self refresh]; }
 - (void)refresh {
@@ -743,53 +726,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         return;
     }
     UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
-    share.popoverPresentationController.sourceView = self.view;
-    share.popoverPresentationController.sourceRect = self.view.bounds;
+    share.popoverPresentationController.sourceView = self.settingsButton;
+    share.popoverPresentationController.sourceRect = self.settingsButton.bounds;
     [self presentViewController:share animated:YES completion:nil];
-}
-
-#pragma mark - Host bar button and search suppression
-
-// LiveContainer's search bar lives in the navigation area. Even with the grid on
-// top, its expansion animation still runs and pushes the content around. Hiding
-// it (rather than fading) removes both the layout slot and the entry point; the
-// views are remembered weakly so native mode can bring them back.
-- (void)lgSuppressNativeSearch:(BOOL)suppress {
-    if (suppress) {
-        UIWindow *window = self.view.window;
-        if (!window) return;
-        NSMutableArray<UIView *> *bars = [NSMutableArray array];
-        LGCollectSearchBars(window.rootViewController.view, self.view, bars);
-        for (UIView *bar in bars) {
-            if (bar.hidden) continue;
-            [self.suppressedSearchViews addObject:bar];
-            bar.hidden = YES;
-        }
-    } else {
-        for (UIView *bar in self.suppressedSearchViews.allObjects) {
-            bar.hidden = NO;
-        }
-        [self.suppressedSearchViews removeAllObjects];
-    }
-}
-
-// The floating switch is the only entry point: it sits on our own view, so it is
-// visible in both modes and immune to SwiftUI rebuilding the navigation bar.
-- (void)lgUpdateReturnButton {
-    UIButtonConfiguration *config = self.returnButton.configuration;
-    BOOL toNative = !self.nativeMode;
-    config.title = toNative ? @"原生布局" : @"宫格布局";
-    config.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.3x3.fill")];
-    self.returnButton.configuration = config;   // struct: reassign to apply
-    self.returnButton.accessibilityLabel = toNative ? @"切换到原生布局" : @"切换到宫格布局";
-}
-
-- (void)toggleMode {
-    if (self.nativeMode) {
-        [self showGrid];
-    } else {
-        [self showNative];
-    }
 }
 
 #pragma mark - Long-press actions (hide / uninstall / reorder)
@@ -799,47 +738,37 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan: {
             NSIndexPath *indexPath = [self.collection indexPathForItemAtPoint:point];
-            BOOL onCell = indexPath && indexPath.item < (NSInteger)self.filtered.count;
-            // Empty space opens the settings sheet; a real cell keeps the
-            // existing drag-reorder / hide / uninstall behaviour.
-            self.pressIndexPath = onCell ? indexPath : nil;
-            self.pressEntry = onCell ? self.filtered[indexPath.item] : nil;
+            if (!indexPath || indexPath.item >= (NSInteger)self.filtered.count) return;
+            self.pressIndexPath = indexPath;
+            self.pressEntry = self.filtered[indexPath.item];
             self.pressStart = point;
             self.moved = NO;
             self.menuShown = NO;
             self.draggingCell = NO;
-            if (onCell) {
-                UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-                [haptic impactOccurred];
-            }
+            UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [haptic impactOccurred];
             // Keep holding still: the menu shows without waiting for the finger to lift.
             NSInteger token = ++self.menuToken;
             __weak typeof(self) weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (!weakSelf || weakSelf.menuToken != token || weakSelf.moved || weakSelf.menuShown) return;
+                if (!weakSelf || weakSelf.menuToken != token || weakSelf.moved || weakSelf.menuShown || !weakSelf.pressEntry) return;
                 weakSelf.menuShown = YES;
-                if (weakSelf.pressEntry) {
-                    UICollectionViewCell *cell = [weakSelf.collection cellForItemAtIndexPath:weakSelf.pressIndexPath];
-                    [weakSelf showActionsForEntry:weakSelf.pressEntry cell:cell];
-                } else {
-                    [weakSelf showSettings];
-                }
+                UICollectionViewCell *cell = [weakSelf.collection cellForItemAtIndexPath:weakSelf.pressIndexPath];
+                [weakSelf showActionsForEntry:weakSelf.pressEntry cell:cell];
             });
             break;
         }
         case UIGestureRecognizerStateChanged: {
-            if (self.menuShown) return;
+            if (!self.pressEntry || self.menuShown) return;
             CGFloat dx = point.x - self.pressStart.x;
             CGFloat dy = point.y - self.pressStart.y;
             if (!self.moved && sqrt(dx * dx + dy * dy) > 6) {
                 self.moved = YES;
                 self.menuToken++;  // cancels the pending menu
-                if (self.pressEntry) {
-                    self.draggingCell = YES;
-                    [self.collection beginInteractiveMovementForItemAtIndexPath:self.pressIndexPath];
-                    UIImpactFeedbackGenerator *dragHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                    [dragHaptic impactOccurred];
-                }
+                self.draggingCell = YES;
+                [self.collection beginInteractiveMovementForItemAtIndexPath:self.pressIndexPath];
+                UIImpactFeedbackGenerator *dragHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                [dragHaptic impactOccurred];
             }
             if (self.draggingCell) [self.collection updateInteractiveMovementTargetPosition:point];
             break;
@@ -850,17 +779,12 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
                 self.draggingCell = NO;
                 [self.collection endInteractiveMovement];
                 [self saveOrder];
-            } else if (!self.menuShown) {
+            } else if (!self.menuShown && self.pressEntry) {
                 // Quick release before the timer: still show the menu.
-                if (self.pressEntry) {
-                    UICollectionViewCell *cell = [self.collection cellForItemAtIndexPath:self.pressIndexPath];
-                    [self showActionsForEntry:self.pressEntry cell:cell];
-                } else {
-                    [self showSettings];
-                }
+                UICollectionViewCell *cell = [self.collection cellForItemAtIndexPath:self.pressIndexPath];
+                [self showActionsForEntry:self.pressEntry cell:cell];
             }
             self.pressEntry = nil;
-            self.pressIndexPath = nil;
             break;
         }
         default: {
@@ -1082,9 +1006,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     sheet.compactTop = [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop];
     sheet.hasBackground = self.backgroundView.image != nil;
     __weak typeof(self) weakSelf = self;
-    sheet.handler = ^(LGSheetAction action) {
-        [weakSelf handleSheetAction:action];
-    };
+    sheet.handler = ^(LGSheetAction action) { [weakSelf handleSheetAction:action]; };
     if (@available(iOS 15.0, *)) {
         UISheetPresentationController *presentation = sheet.sheetPresentationController;
         presentation.detents = @[UISheetPresentationControllerDetent.mediumDetent,
@@ -1120,16 +1042,15 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         }
         case LGSheetActionChooseBackground:
         case LGSheetActionRemoveBackground:
-        case LGSheetActionExportLog: {
-            // The sheet has just been dismissed; give UIKit a beat before
-            // presenting the picker or the share sheet on top of it.
+        case LGSheetActionExportLog:
+            // The sheet is dismissing; give UIKit a beat before presenting the
+            // picker or the share sheet on top of it.
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (action == LGSheetActionChooseBackground) [self chooseBackground];
                 else if (action == LGSheetActionRemoveBackground) [self removeBackground];
                 else [self exportLog];
             });
             break;
-        }
         case LGSheetActionSwitchMode:
             [self showNative];
             break;
@@ -1141,6 +1062,169 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) [self.collection reloadData];
 }
 @end
+
+static const void *LGOverlayKey = &LGOverlayKey;
+static NSHashTable<LGGridController *> *LGOverlays;
+static NSString *LGTitle(void) {
+    NSBundle *bundle = LGGet(NSUserDefaults.class, @"lcMainBundle");
+    return [bundle localizedStringForKey:@"lc.appList.myApps" value:@"My Apps" table:nil];
+}
+static UIViewController *LGFindList(UIViewController *vc) {
+    if (!vc || !vc.isViewLoaded || !vc.view.window || vc.view.hidden) return nil;
+    if ([vc isKindOfClass:LGGridController.class]) return nil;
+    if ([vc isKindOfClass:UITabBarController.class]) return LGFindList(((UITabBarController *)vc).selectedViewController);
+    if ([vc isKindOfClass:UINavigationController.class]) {
+        UINavigationController *nav = (id)vc;
+        UIViewController *top = nav.topViewController;
+        // Do not cover pushed management screens or unknown SwiftUI hierarchies.
+        NSString *title = top.navigationItem.title ?: nav.navigationBar.topItem.title;
+        NSString *hostingClass = NSStringFromClass(top.class);
+        BOOL isHosting = [hostingClass containsString:@"HostingController"];
+        BOOL titleMatches = [title isEqualToString:LGTitle()] || title.length == 0;
+        if (nav.viewControllers.count == 1 && isHosting && titleMatches) return top;
+        return nil;
+    }
+    for (UIViewController *child in vc.childViewControllers) {
+        UIViewController *found = LGFindList(child);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static void LGDumpController(UIViewController *vc, NSUInteger depth, NSMutableString *out) {
+    if (!vc || depth > 6 || out.length > 1600) return;
+    NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
+    NSString *title = vc.navigationItem.title ?: vc.title;
+    [out appendFormat:@"%@%@%@%@\n", indent, NSStringFromClass(vc.class),
+        vc.isViewLoaded ? (vc.view.window ? @" [on-screen]" : @" [loaded]") : @" [no-view]",
+        title.length ? [NSString stringWithFormat:@" \"%@\"", title] : @""];
+    for (UIViewController *child in vc.childViewControllers) LGDumpController(child, depth + 1, out);
+}
+static void LGDumpWindows(void) {
+    NSMutableString *out = [NSMutableString string];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.hidden || window.alpha == 0) continue;
+            [out appendFormat:@"window level=%.1f root=%@\n", window.windowLevel, NSStringFromClass(window.rootViewController.class)];
+            LGDumpController(window.rootViewController, 1, out);
+        }
+    }
+    // Classes/titles only: no app names, bundle ids or container paths.
+    LGLog([NSString stringWithFormat:@"No host matched after 6s; view hierarchy:\n%@", out]);
+}
+
+static void LGTick(void) {
+    // Inactive is normal during the launch animation; only skip when backgrounded.
+    if (UIApplication.sharedApplication.applicationState == UIApplicationStateBackground) return;
+    static BOOL loggedFirstTick = NO;
+    if (!loggedFirstTick) {
+        loggedFirstTick = YES;
+        LGLog([NSString stringWithFormat:@"First tick after %.0f ms (appState=%ld)",
+               (CFAbsoluteTimeGetCurrent() - LGStartTime) * 1000.0,
+               (long)UIApplication.sharedApplication.applicationState]);
+    }
+    NSHashTable *active = [NSHashTable weakObjectsHashTable];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState == UISceneActivationStateUnattached || scene.activationState == UISceneActivationStateBackground) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.hidden || window.alpha == 0 || window.windowLevel != UIWindowLevelNormal) continue;
+            UIViewController *host = LGFindList(window.rootViewController);
+            if (!host) continue;
+            LGGridController *grid = objc_getAssociatedObject(host, LGOverlayKey);
+            if (grid && grid.view.superview != host.view) {
+                // SwiftUI rebuilt the page view under us; drop the stale overlay so
+                // it is mounted fresh below instead of silently doing nothing.
+                objc_setAssociatedObject(host, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                grid = nil;
+            }
+            if (grid) {
+                // SwiftUI re-inserts its own content when a tab comes back; without
+                // this the native list paints above our overlay until the next tick.
+                if (host.view.subviews.lastObject != grid.view) [host.view bringSubviewToFront:grid.view];
+                [active addObject:grid];
+                continue;
+            }
+            grid = [LGGridController new];
+            [host addChildViewController:grid];
+            grid.view.translatesAutoresizingMaskIntoConstraints = NO;
+            [host.view addSubview:grid.view];
+            // Cover the host view edge to edge: the native list may extend under
+            // the translucent tab bar, and leaving that strip uncovered leaks the
+            // unmodified rows through the glass. Content is inset by safeAreaInsets
+            // inside LGGridController instead.
+            [NSLayoutConstraint activateConstraints:@[
+                [grid.view.leadingAnchor constraintEqualToAnchor:host.view.leadingAnchor],
+                [grid.view.trailingAnchor constraintEqualToAnchor:host.view.trailingAnchor],
+                [grid.view.topAnchor constraintEqualToAnchor:host.view.topAnchor],
+                [grid.view.bottomAnchor constraintEqualToAnchor:host.view.bottomAnchor]
+            ]];
+            [grid didMoveToParentViewController:host];
+            objc_setAssociatedObject(host, LGOverlayKey, grid, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [LGOverlays addObject:grid];
+            [active addObject:grid];
+            LGLog([NSString stringWithFormat:@"Mounted on native app-list hosting controller after %.0f ms (safe.top=%.1f navBottom=%.1f)",
+                   (CFAbsoluteTimeGetCurrent() - LGStartTime) * 1000.0,
+                   host.view.safeAreaInsets.top, [grid lgTopInset]]);
+        }
+    }
+    for (LGGridController *grid in LGOverlays) {
+        // Never hide the overlay while the host page is off-screen (tab switch,
+        // pushed sheet): the view is simply not visible then, and hiding it makes
+        // the native list flash for up to one tick when the user comes back.
+        if ([active containsObject:grid]) {
+            if (grid.wasAway) {
+                grid.wasAway = NO;
+                [grid refresh];
+            }
+            [grid lgSyncLayout];
+        } else {
+            grid.wasAway = YES;
+        }
+    }
+    static CFTimeInterval idleSince = 0;
+    static BOOL dumpedHierarchy = NO;
+    if (LGOverlays.count == 0) {
+        if (idleSince == 0) idleSince = CFAbsoluteTimeGetCurrent();
+        if (!dumpedHierarchy && CFAbsoluteTimeGetCurrent() - idleSince > 6) {
+            dumpedHierarchy = YES;
+            LGDumpWindows();
+        }
+    } else {
+        idleSince = 0;
+    }
+}
+
+__attribute__((constructor)) static void LGInitialize(void) {
+    @autoreleasepool {
+        if (!LGHost()) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LGOverlays = [NSHashTable weakObjectsHashTable];
+            LGStartTime = CFAbsoluteTimeGetCurrent();
+            [NSUserDefaults.standardUserDefaults registerDefaults:@{LGColumns:@4, LGNames:@YES, LGNative:@NO, LGCompactTop:@YES}];
+            LGLog([NSString stringWithFormat:@"Host gate passed: LiveContainer %@ (>= 3.8.0); %@ loaded; no method hooks installed", LGDetectedVersion ?: @"?", LGLoadedName()]);
+            // Public UI containment and a low-frequency foreground discovery timer.
+            // No swizzling, substrate hooks, key window replacement or gesture hooks.
+            // 0.15s discovery: a 1s poll is what made returning to the App tab show
+            // the native list for about a second before the grid reappeared.
+            NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) { LGTick(); }];
+            timer.tolerance = 0.03;
+            // Startup burst: poll at 30ms for the first 1.2s so the overlay lands on
+            // the host page within one frame instead of one 100ms tick. It stops as
+            // soon as the burst window ends; the steady 0.1s timer takes over.
+            LGTick();
+            [NSTimer scheduledTimerWithTimeInterval:0.03 repeats:YES block:^(NSTimer *burstTimer) {
+                LGTick();
+                if (CFAbsoluteTimeGetCurrent() - LGStartTime > 1.2) [burstTimer invalidate];
+            }];
+            [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+                LGTick();
+                // Pick up apps installed/removed while the host was in background.
+                for (LGGridController *grid in LGOverlays) [grid refresh];
+            }];
+        });
+    }
+}
 
 #pragma mark - Settings sheet implementation
 
@@ -1207,8 +1291,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [root setCustomSpacing:6 afterView:root.arrangedSubviews.lastObject];
 
     NSMutableArray<UIView *> *backgroundRows = [NSMutableArray array];
-    UIButton *choose = [self pillButton:(self.hasBackground ? @"更换" : @"选择") action:@selector(chooseTapped)];
-    [backgroundRows addObject:[self rowWithTitle:@"背景图片" control:choose]];
+    [backgroundRows addObject:[self rowWithTitle:@"背景图片" control:[self pillButton:(self.hasBackground ? @"更换" : @"选择") action:@selector(chooseTapped)]]];
     if (self.hasBackground) {
         [backgroundRows addObject:[self separator]];
         UIButton *remove = [self pillButton:@"移除" action:@selector(removeTapped)];
@@ -1230,8 +1313,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     UIButton *switchMode = [UIButton buttonWithType:UIButtonTypeSystem];
     UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
     config.title = @"切换到原生列表";
-    config.baseBackgroundColor = UIColor.labelColor;
-    config.baseForegroundColor = UIColor.systemBackgroundColor;
     config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
     switchMode.configuration = config;
     [switchMode.heightAnchor constraintEqualToConstant:50].active = YES;
@@ -1320,9 +1401,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     return button;
 }
 
-// Settings that are visible behind the sheet apply immediately and keep it
-// open, so the effect can be judged without reopening. Everything that leaves
-// the grid (picker, share sheet, mode switch) runs after the dismissal.
+// Live settings (columns/names/spacing) apply behind the sheet without closing
+// it; anything that presents another controller runs after dismissal.
 - (void)fire:(LGSheetAction)action dismiss:(BOOL)dismiss {
     void (^handler)(LGSheetAction) = self.handler;
     if (!dismiss) {
@@ -1344,3 +1424,4 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)switchTapped { [self fire:LGSheetActionSwitchMode dismiss:YES]; }
 
 @end
+

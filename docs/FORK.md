@@ -29,6 +29,23 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta15 — 字号回退、切 tab 挂到真正的切换点（2026-11-13）
+
+beta14 两个问题：
+
+1. 字号 34 → 31 的依据是 `navLabels="App" 31pt {{20, 119.33}, {6.67, 37}}`，但宽度 6.67 说明
+   那是导航栏里的子 label（单个字形），不是大标题。垂直方向其实已经对了——日志里
+   `title={{20, 119.333}}` 与 `nativeTitle={{20, 119.333}}` 完全相等。
+2. 切 tab 仍闪：恢复逻辑放在 `viewDidLayoutSubviews`，但切 tab 时覆盖层 bounds 不变，
+   layout 根本不触发，那段代码一次没跑，仍靠 0.1s tick。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `loadView` | 字号 31 → **34**（与 beta13 一致） |
+| 同上 | `top + 13` | 保持不变（顶部与原生 119.333 对齐） |
+| 同上 | `LGInstallTabSwitchHook` | 新增。对 `SwiftUI.UIKitTabBarController` 的 `setSelectedIndex:` / `setSelectedViewController:` 做 `method_setImplementation`，先调原实现再刷新所有覆盖层的可见性。类在 dyld 构造期未加载，改为 tick 内重试（上限 30 次） |
+| 同上 | `LGTick` | 首次安装成功打一条 `Tab switch hook active` |
+
 ## 0.0.1 beta14 — 标题对齐到实测基线、切 tab 不闪（2026-11-13）
 
 beta13 实测日志（pid=3800 / 3815）给出了两个关键值：

@@ -668,10 +668,10 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.titleLabel = [UILabel new];
     self.titleLabel.text = @"App";
     // Explicit bold: preferredFontForTextStyle does not guarantee the nav-bar weight.
-    // 31pt bold, not the 34pt used by older iOS: the host's own large title measured
-    // 31pt / 37pt tall on iOS 26 (navLabels="App" 31pt), and matching it removes the
-    // size step that was visible when toggling layouts.
-    UIFont *titleBase = [UIFont systemFontOfSize:31 weight:UIFontWeightBold];
+    // Back to 34pt: the 31pt reading came from a 6.67pt-wide sub-label in the bar, not
+    // from the large title itself. Size was never different between the two layouts;
+    // only the vertical offset was.
+    UIFont *titleBase = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
     self.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleLargeTitle] scaledFontForFont:titleBase];
     self.titleLabel.adjustsFontForContentSizeCategory = YES;
     self.titleLabel.textColor = UIColor.labelColor;
@@ -2106,6 +2106,52 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 
 static const void *LGOverlayKey = &LGOverlayKey;
 static NSHashTable<LGGridController *> *LGOverlays;
+
+// Only the tab bar controller knows a tab change is happening. Polling it means the
+// grid comes back up to one tick late, which reads as a flash of the native list;
+// hooking the setter puts the panel back in the same runloop turn, before the frame
+// is composited. Lives on the concrete SwiftUI subclass when it exists, because that
+// subclass overrides the setters and would never reach a hook on the base class.
+static void LGRefreshAllTabVisibility(void) {
+    for (LGGridController *grid in LGOverlays) [grid lgUpdateTabVisibilityForce:YES];
+}
+
+static BOOL LGTabHookInstalled = NO;
+static NSInteger LGTabHookAttempts = 0;
+static IMP LGOriginalSelectIndex;
+static IMP LGOriginalSelectController;
+
+static void LGInstallTabSwitchHook(void) {
+    // Bounded retries: the class does not exist during the dyld constructor, and
+    // hooking the base class is pointless when the subclass overrides the setters.
+    if (LGTabHookInstalled || LGTabHookAttempts > 30) return;
+    LGTabHookAttempts++;
+    Class cls = NSClassFromString(@"SwiftUI.UIKitTabBarController");
+    if (!cls) return;
+    BOOL hooked = NO;
+    SEL indexSel = @selector(setSelectedIndex:);
+    Method indexMethod = class_getInstanceMethod(cls, indexSel);
+    if (indexMethod) {
+        IMP replacement = imp_implementationWithBlock(^(UITabBarController *tab, NSUInteger index) {
+            if (LGOriginalSelectIndex) ((void (*)(id, SEL, NSUInteger))LGOriginalSelectIndex)(tab, indexSel, index);
+            LGRefreshAllTabVisibility();
+        });
+        IMP previous = method_setImplementation(indexMethod, replacement);
+        if (previous) { LGOriginalSelectIndex = previous; hooked = YES; }
+    }
+    SEL controllerSel = @selector(setSelectedViewController:);
+    Method controllerMethod = class_getInstanceMethod(cls, controllerSel);
+    if (controllerMethod) {
+        IMP replacement = imp_implementationWithBlock(^(UITabBarController *tab, UIViewController *controller) {
+            if (LGOriginalSelectController) ((void (*)(id, SEL, id))LGOriginalSelectController)(tab, controllerSel, controller);
+            LGRefreshAllTabVisibility();
+        });
+        IMP previous = method_setImplementation(controllerMethod, replacement);
+        if (previous) { LGOriginalSelectController = previous; hooked = YES; }
+    }
+    LGTabHookInstalled = hooked;
+}
+
 static NSString *LGTitle(void) {
     // Called on every layout pass by the appearance hook, so resolve it once.
     static NSString *cached;
@@ -2240,6 +2286,13 @@ static void LGDumpWindows(void) {
 }
 
 static void LGTick(void) {
+    // The tab bar controller class may not exist yet during the dyld constructor.
+    if (!LGTabHookInstalled) LGInstallTabSwitchHook();
+    static BOOL loggedTabHook = NO;
+    if (LGTabHookInstalled && !loggedTabHook) {
+        loggedTabHook = YES;
+        LGLog(@"Tab switch hook active (setSelectedIndex / setSelectedViewController)");
+    }
     // Inactive is normal during the launch animation; only skip when backgrounded.
     if (UIApplication.sharedApplication.applicationState == UIApplicationStateBackground) return;
     static BOOL loggedFirstTick = NO;
@@ -2369,6 +2422,7 @@ __attribute__((constructor)) static void LGInitialize(void) {
         LGStartTime = CFAbsoluteTimeGetCurrent();
         [NSUserDefaults.standardUserDefaults registerDefaults:@{LGColumns:@4, LGNames:@YES, LGNative:@NO, LGCompactTop:@YES}];
         LGInstallAppearanceHooks();
+        LGInstallTabSwitchHook();
         dispatch_async(dispatch_get_main_queue(), ^{
             LGLog([NSString stringWithFormat:@"Host gate passed: LiveContainer %@ (>= 3.8.0); %@ loaded; hooks viewWillAppear=%d viewDidLayoutSubviews=%d",
                    LGDetectedVersion ?: @"?", LGLoadedName(), LGWillAppearHooked, LGDidLayoutHooked]);

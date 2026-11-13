@@ -2470,6 +2470,366 @@ static void LGDumpWindows(void) {
     LGLog([NSString stringWithFormat:@"No host matched after 6s; view hierarchy:\n%@", out]);
 }
 
+#pragma mark - 悬浮把手（圆形玻璃，独立 UIWindow，零微珠依赖）
+
+static NSString *const LGHandleSide = @"LCGridLayout.handleSide";  // YES = 吸附左边缘
+static NSString *const LGHandleY = @"LCGridLayout.handleY";        // 垂直位置比例 0..1
+
+// 触觉反馈：单击/吸附=轻，双击=中，长按=重。
+static void LGHaptic(UIImpactFeedbackStyle style) {
+    if (@available(iOS 13.0, *)) {
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:style];
+        [gen prepare];
+        [gen impactOccurred];
+    }
+}
+
+// 透传窗口：自身与根视图不接收触摸，只有把手接。写法与微珠的
+// LCOrbitPassThroughWindow 一致，但类是我们自己的，不经过它的 dylib。
+@interface LGHandleWindow : UIWindow
+@end
+@implementation LGHandleWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *target = [super hitTest:point withEvent:event];
+    return (target == self || target == self.rootViewController.view) ? nil : target;
+}
+@end
+
+@interface LGHandleRootViewController : UIViewController
+@end
+@implementation LGHandleRootViewController
+- (BOOL)shouldAutorotate { return YES; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAllButUpsideDown; }
+@end
+
+// 把手控制器：独立 UIWindow（level = Normal + 75，微珠同款数值）托住一枚
+// 50pt 圆形玻璃按钮。动作全部走 LC 本体接口：
+//   回主界面 = DecoratedAppSceneViewController minimizeWindow
+//   切换     = 收集在跑窗口后恢复下一个（hidden=NO + bringToFront）
+//   关闭     = closeWindow（窗口自带关闭按钮用的就是它）
+// 微珠不在时照样工作；接口消失只会降级为震动提示，不会崩。
+@interface LGHandleController : NSObject
+@property(nonatomic, strong) UIWindow *window;
+@property(nonatomic, strong) UIView *handle;      // 50pt 圆形玻璃容器
+@property(nonatomic, strong) UIView *idleDot;     // 无任务：灰点常亮
+@property(nonatomic, strong) UIView *runningDot;  // 有任务：绿点呼吸（与宫格角标同款）
+@property(nonatomic, assign) CGPoint grabOffset;
+@property(nonatomic, assign) CFTimeInterval lastTick;
+@property(nonatomic, assign) CFTimeInterval lastDotRefresh;
++ (instancetype)sharedController;
+- (void)lgTickInScene:(UIWindowScene *)scene;
+@end
+
+@implementation LGHandleController
+
++ (instancetype)sharedController {
+    static LGHandleController *shared;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ shared = [LGHandleController new]; });
+    return shared;
+}
+
+- (void)lgTickInScene:(UIWindowScene *)scene {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - self.lastTick < 0.15) return;
+    self.lastTick = now;
+    if (!scene) return;
+    // Scene 被销毁或换场景时重建（微珠同款策略）。
+    if (self.window && self.window.windowScene != scene) {
+        [self.window setHidden:YES];
+        self.window.rootViewController = nil;
+        self.window = nil;
+        self.handle = nil;
+    }
+    if (!self.window) [self lgCreateWindowInScene:scene];
+    if (!self.window) return;
+    CGRect bounds = scene.coordinateSpace.bounds;
+    if (!CGRectEqualToRect(self.window.frame, bounds)) self.window.frame = bounds;
+    // 圆点状态低频刷新：有在跑的任务 → 绿色呼吸；没有 → 灰色常亮。
+    if (now - self.lastDotRefresh >= 0.5) {
+        self.lastDotRefresh = now;
+        NSInteger running = [self lgRunningCount];
+        self.runningDot.hidden = running == 0;
+        self.idleDot.hidden = running > 0;
+    }
+}
+
+- (void)lgCreateWindowInScene:(UIWindowScene *)scene {
+    CGRect frame = scene.coordinateSpace.bounds;
+    if (!(frame.size.width > 0) || !(frame.size.height > 0)) return;
+    LGHandleWindow *window = [[LGHandleWindow alloc] initWithWindowScene:scene];
+    window.frame = frame;
+    window.backgroundColor = UIColor.clearColor;
+    window.windowLevel = UIWindowLevelNormal + 75;
+    LGHandleRootViewController *root = [LGHandleRootViewController new];
+    root.view.backgroundColor = UIColor.clearColor;
+    window.rootViewController = root;
+    [root.view addSubview:[self lgBuildHandle]];
+    self.window = window;
+    [window setHidden:NO];
+    [self lgApplyPosition];
+}
+
+// 50pt 圆形玻璃：UIBlurEffect(systemThinMaterial，深浅色自适应) + 细描边 + 阴影，
+// 中心一枚圆点（LGRunningLight 同款绿呼吸）。微珠把手是椭圆 dock 形状，这里是圆形。
+- (UIView *)lgBuildHandle {
+    CGFloat size = 50;
+    UIView *handle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, size, size)];
+    handle.layer.cornerRadius = size * 0.5;
+    handle.layer.shadowColor = UIColor.blackColor.CGColor;
+    handle.layer.shadowOpacity = 0.25;
+    handle.layer.shadowRadius = 8;
+    handle.layer.shadowOffset = CGSizeMake(0, 2);
+    UIBlurEffectStyle style = UITraitCollection.currentTraitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
+        ? UIBlurEffectStyleSystemThinMaterialDark : UIBlurEffectStyleSystemThinMaterialLight;
+    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:style]];
+    glass.frame = handle.bounds;
+    glass.layer.cornerRadius = size * 0.5;
+    glass.clipsToBounds = YES;
+    glass.userInteractionEnabled = NO;
+    [handle addSubview:glass];
+    // rim 描边（微珠把手的玻璃边缘高光同款思路）。
+    UIView *rim = [[UIView alloc] initWithFrame:handle.bounds];
+    rim.layer.cornerRadius = size * 0.5;
+    rim.layer.borderWidth = 0.5;
+    rim.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
+    rim.userInteractionEnabled = NO;
+    [handle addSubview:rim];
+    // 中心圆点：两个状态切换。
+    UIView *dotBox = [[UIView alloc] initWithFrame:CGRectMake((size - 12) * 0.5, (size - 12) * 0.5, 12, 12)];
+    dotBox.userInteractionEnabled = NO;
+    self.runningDot = LGRunningLight(12);
+    [dotBox addSubview:self.runningDot];
+    self.idleDot = [[UIView alloc] initWithFrame:CGRectMake(2.5, 2.5, 7, 7)];
+    self.idleDot.layer.cornerRadius = 3.5;
+    self.idleDot.backgroundColor = UIColor.tertiaryLabelColor;
+    [dotBox addSubview:self.idleDot];
+    [handle addSubview:dotBox];
+
+    UITapGestureRecognizer *single = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSingleTap:)];
+    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+    doubleTap.numberOfTapsRequired = 2;
+    [single requireGestureRecognizerToFail:doubleTap];
+    UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleHold:)];
+    hold.minimumPressDuration = 0.45;
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    for (UIGestureRecognizer *g in @[single, doubleTap, hold, pan]) [handle addGestureRecognizer:g];
+    return handle;
+}
+
+- (void)lgApplyPosition {
+    UIWindow *window = self.window;
+    if (!window || !self.handle) return;
+    CGRect bounds = window.bounds;
+    UIEdgeInsets safe = window.safeAreaInsets;
+    CGFloat size = CGRectGetWidth(self.handle.bounds);
+    BOOL left = [NSUserDefaults.standardUserDefaults boolForKey:LGHandleSide];
+    CGFloat frac = [NSUserDefaults.standardUserDefaults doubleForKey:LGHandleY];
+    if (frac <= 0 || frac >= 1) frac = 0.72;
+    CGFloat minY = safe.top + 8, maxY = bounds.height - safe.bottom - size - 8;
+    if (maxY < minY) maxY = minY;
+    CGFloat y = minY + (maxY - minY) * frac;
+    CGFloat x = left ? safe.left + 6 : bounds.width - safe.right - size - 6;
+    self.handle.frame = CGRectMake(x, y, size, size);
+}
+
+// 收集多任务窗口：任务视图挂在 MultitaskDockManager.windowHostingView（@objc）上，
+// 沿 responder chain 找到 LC 自己的 DecoratedAppSceneViewController，读公开属性。
+- (NSArray *)lgTaskWindows {
+    NSMutableArray *result = [NSMutableArray new];
+    Class dock = NSClassFromString(@"MultitaskDockManager");
+    SEL sharedSel = NSSelectorFromString(@"shared");
+    SEL hostSel = NSSelectorFromString(@"windowHostingView");
+    if (!dock || ![dock respondsToSelector:sharedSel]) return result;
+    id manager = ((id (*)(id, SEL))objc_msgSend)(dock, sharedSel);
+    if (!manager || ![manager respondsToSelector:hostSel]) return result;
+    UIView *hosting = ((UIView *(*)(id, SEL))objc_msgSend)(manager, hostSel);
+    if (!hosting) return result;
+    Class decorated = NSClassFromString(@"DecoratedAppSceneViewController");
+    if (!decorated) return result;
+    for (UIView *sub in hosting.subviews) {
+        UIResponder *r = sub;
+        for (int hop = 0; hop < 6 && r; hop++) {
+            r = r.nextResponder;
+            if ([r isKindOfClass:decorated]) break;
+        }
+        if (![r isKindOfClass:decorated]) continue;
+        UIViewController *vc = (UIViewController *)r;
+        if (![vc respondsToSelector:@selector(appSceneVC)]) continue;
+        id sceneVC = ((id (*)(id, SEL))objc_msgSend)(vc, @selector(appSceneVC));
+        NSString *uuid = nil;
+        BOOL running = NO;
+        if ([sceneVC respondsToSelector:@selector(dataUUID)]) {
+            id value = ((id (*)(id, SEL))objc_msgSend)(sceneVC, @selector(dataUUID));
+            if ([value isKindOfClass:NSString.class]) uuid = value;
+        }
+        if ([sceneVC respondsToSelector:@selector(isAppRunning)]) {
+            running = ((BOOL (*)(id, SEL))objc_msgSend)(sceneVC, @selector(isAppRunning));
+        }
+        if (uuid.length == 0) continue;
+        BOOL visible = !sub.hidden && sub.alpha > 0.05 && sub.window != nil;
+        [result addObject:@{@"vc": vc, @"view": sub, @"uuid": uuid, @"running": @(running), @"visible": @(visible)}];
+    }
+    return result;
+}
+
+- (NSInteger)lgRunningCount {
+    NSInteger count = 0;
+    for (NSDictionary *entry in [self lgTaskWindows]) {
+        if ([entry[@"running"] boolValue]) count++;
+    }
+    return count;
+}
+
+// ① 单击：回 LC 主界面（当前前台窗口 minimizeWindow）；已在主界面 → 轻震提示。
+- (void)handleSingleTap:(UITapGestureRecognizer *)g {
+    LGHaptic(UIImpactFeedbackStyleLight);
+    for (NSDictionary *entry in [self lgTaskWindows]) {
+        if (![entry[@"visible"] boolValue] || ![entry[@"running"] boolValue]) continue;
+        UIViewController *vc = entry[@"vc"];
+        if ([vc respondsToSelector:@selector(minimizeWindow)]) {
+            ((void (*)(id, SEL))objc_msgSend)(vc, @selector(minimizeWindow));
+            LGLog(@"Handle tap: minimized the frontmost guest");
+        }
+        return;
+    }
+}
+
+// ② 双击：切到下一个在跑的 app；只有 1 个 → 中震提示。
+- (void)handleDoubleTap:(UITapGestureRecognizer *)g {
+    LGHaptic(UIImpactFeedbackStyleMedium);
+    NSArray *running = [NSMutableArray new];
+    for (NSDictionary *entry in [self lgTaskWindows]) {
+        if ([entry[@"running"] boolValue]) [(NSMutableArray *)running addObject:entry];
+    }
+    if (running.count <= 1) {
+        LGLog(@"Handle double tap: only one guest is running, nothing to switch");
+        return;
+    }
+    // 当前 = 最上层可见窗口；下一个 = 列表循环中它之后的第一个。
+    NSUInteger current = NSNotFound;
+    for (NSUInteger i = 0; i < running.count; i++) {
+        if ([running[i][@"visible"] boolValue]) { current = i; break; }
+    }
+    NSDictionary *next = running[(current == NSNotFound ? 0 : current + 1) % running.count];
+    UIView *view = next[@"view"];
+    UIViewController *vc = next[@"vc"];
+    if (![vc respondsToSelector:@selector(minimizeWindow)]) return;
+    view.alpha = 0;
+    view.hidden = NO;
+    [view.superview bringSubviewToFront:view];
+    [UIView animateWithDuration:0.22 animations:^{ view.alpha = 1; }];
+    LGLog([NSString stringWithFormat:@"Handle double tap: switched to guest %@", next[@"uuid"]]);
+}
+
+// ③ 长按：在 app 里 → 关当前；在主界面 → 确认后关全部。
+- (void)handleHold:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    LGHaptic(UIImpactFeedbackStyleHeavy);
+    NSArray *windows = [self lgTaskWindows];
+    UIViewController *frontVC = nil;
+    for (NSDictionary *entry in windows) {
+        if ([entry[@"visible"] boolValue] && [entry[@"running"] boolValue]) { frontVC = entry[@"vc"]; break; }
+    }
+    if (frontVC && [frontVC respondsToSelector:@selector(closeWindow)]) {
+        ((void (*)(id, SEL))objc_msgSend)(frontVC, @selector(closeWindow));
+        LGLog(@"Handle long press: closed the frontmost guest");
+        return;
+    }
+    NSInteger running = 0;
+    for (NSDictionary *entry in windows) {
+        if ([entry[@"running"] boolValue]) running++;
+    }
+    if (running == 0) {
+        LGLog(@"Handle long press: nothing to close");
+        return;
+    }
+    [self lgConfirmCloseAll:running windows:windows];
+}
+
+- (void)lgConfirmCloseAll:(NSInteger)count windows:(NSArray *)windows {
+    UIWindowScene *scene = nil;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if ([s isKindOfClass:UIWindowScene.class] && s.activationState == UISceneActivationStateForegroundActive) {
+            scene = (UIWindowScene *)s;
+            break;
+        }
+    }
+    UIWindow *key = scene.keyWindow;
+    if (!key || !key.rootViewController) {
+        LGLog(@"Handle close-all: no root to present the confirmation on");
+        return;
+    }
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:[NSString stringWithFormat:@"即将关闭 %ld 个App后台", (long)count]
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleAlert];
+    // 弹窗在主窗口（level Normal），会被把手盖住 —— 确认期间先藏把手。
+    self.handle.hidden = YES;
+    [alert addAction:[UIAlertAction actionWithTitle:@"是" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
+        NSInteger closed = 0;
+        for (NSDictionary *entry in windows) {
+            if (![entry[@"running"] boolValue]) continue;
+            UIViewController *vc = entry[@"vc"];
+            if ([vc respondsToSelector:@selector(closeWindow)]) {
+                ((void (*)(id, SEL))objc_msgSend)(vc, @selector(closeWindow));
+                closed++;
+            }
+        }
+        self.handle.hidden = NO;
+        LGLog([NSString stringWithFormat:@"Handle close-all: closed %ld guest(s)", (long)closed]);
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"否" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a) {
+        self.handle.hidden = NO;
+    }]];
+    [key.rootViewController presentViewController:alert animated:YES completion:nil];
+}
+
+// ④ 拖动：跟手移动，松手吸附到较近的左/右边缘，位置持久化。
+- (void)handlePan:(UIPanGestureRecognizer *)g {
+    UIView *handle = self.handle;
+    if (!handle.superview) return;
+    if (g.state == UIGestureRecognizerStateBegan) {
+        CGPoint p = [g locationInView:handle.superview];
+        self.grabOffset = CGPointMake(p.x - handle.center.x, p.y - handle.center.y);
+    } else if (g.state == UIGestureRecognizerStateChanged) {
+        CGPoint p = [g locationInView:handle.superview];
+        handle.center = CGPointMake(p.x - self.grabOffset.x, p.y - self.grabOffset.y);
+    } else if (g.state == UIGestureRecognizerStateEnded) {
+        [self lgSnapAndSave];
+        LGHaptic(UIImpactFeedbackStyleLight);
+    }
+}
+
+- (void)lgSnapAndSave {
+    UIWindow *window = self.window;
+    UIView *handle = self.handle;
+    if (!window || !handle.superview) return;
+    CGRect bounds = window.bounds;
+    UIEdgeInsets safe = window.safeAreaInsets;
+    CGFloat size = CGRectGetWidth(handle.bounds);
+    CGFloat minY = safe.top + 8, maxY = bounds.height - safe.bottom - size - 8;
+    if (maxY < minY) maxY = minY;
+    CGFloat y = MIN(MAX(handle.center.y, minY + size * 0.5), maxY + size * 0.5);
+    CGFloat leftX = safe.left + 6 + size * 0.5;
+    CGFloat rightX = bounds.width - safe.right - size - 6 + size * 0.5;
+    BOOL toLeft = fabs(handle.center.x - leftX) < fabs(handle.center.x - rightX);
+    CGFloat x = toLeft ? leftX : rightX;
+    [UIView animateWithDuration:0.22
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{ handle.center = CGPointMake(x, y); }
+                     completion:nil];
+    BOOL oldLeft = [NSUserDefaults.standardUserDefaults boolForKey:LGHandleSide];
+    if (toLeft != oldLeft || 1) {
+        CGFloat frac = (maxY > minY) ? (y - size * 0.5 - minY) / (maxY - minY) : 0.72;
+        [NSUserDefaults.standardUserDefaults setBool:toLeft forKey:LGHandleSide];
+        [NSUserDefaults.standardUserDefaults setDouble:MAX(0, MIN(1, frac)) forKey:LGHandleY];
+    }
+}
+
+@end
+
 static void LGTick(void) {
     // The tab bar controller class may not exist yet during the dyld constructor.
     if (!LGTabHookInstalled) LGInstallTabSwitchHook();
@@ -2488,12 +2848,14 @@ static void LGTick(void) {
                (long)UIApplication.sharedApplication.applicationState]);
     }
     NSHashTable *active = [NSHashTable weakObjectsHashTable];
+    UIWindowScene *handleScene = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState == UISceneActivationStateUnattached || scene.activationState == UISceneActivationStateBackground) continue;
         for (UIWindow *window in ((UIWindowScene *)scene).windows) {
             if (window.hidden || window.alpha == 0 || window.windowLevel != UIWindowLevelNormal) continue;
             UIViewController *host = LGFindList(window.rootViewController);
             if (!host) continue;
+            if (!handleScene) handleScene = (UIWindowScene *)scene;
             LGGridController *grid = objc_getAssociatedObject(host, LGOverlayKey);
             if (grid && grid.view.superview != host.view) {
                 // SwiftUI rebuilt the page view under us; drop the stale overlay so
@@ -2513,6 +2875,8 @@ static void LGTick(void) {
             if (grid) [active addObject:grid];
         }
     }
+    // 悬浮把手：常驻，挂在宿主所在的 scene 上，与宫格挂载互相独立。
+    [LGHandleController.sharedController lgTickInScene:handleScene];
     for (LGGridController *grid in LGOverlays) {
         // Independent of `active`: when SwiftUI swaps tab containers the host page can
         // drop out of the window entirely, and this is the only thing that brings the

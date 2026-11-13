@@ -29,6 +29,35 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta23 — 悬浮把手：常驻圆形玻璃，动作全走 LC 本体（2026-11-14）
+
+用户需求：复刻微珠把手但要**圆形**、大小与宫格/列表切换按钮一致（50pt），且**不依赖微珠**
+（用户计划停用 LCFloatingMenu）。
+
+依赖核查结论：`LCOrbitMultitask` 整个类编译在微珠 dylib 里（LCSS 的 Xcode 工程不含
+LCOrbit 源码），卸掉微珠后 showHome/activeWindow/closeCurrentGuest 全部消失。因此
+把手一律走 LC 本体接口，用户仓库 `LC-SS-widget-export`（微珠源码）仅作实现参考。
+
+| 动作 | 接口（LC 本体） | 出处 |
+|---|---|---|
+| 回主界面 | 前台窗口 `minimizeWindow`（动画→hidden→sendToBack） | DecoratedAppSceneViewController.m:250 |
+| 切换 app | 遍历 `windowHostingView.subviews` 收集 running 窗口，恢复下一个（unhide+bringToFront+alpha 动画） | dock 的 bringMultitaskViewToFront 的 ObjC 复刻 |
+| 关当前/全部 | `closeWindow`（terminate 或直接 appDidExit） | DecoratedAppSceneViewController.m:242 |
+| 在不在 app 里 | `appSceneVC.isAppRunning` + 视图可见性 | 公开属性 |
+
+实现要点：
+
+| 项 | 数值/方案 |
+|---|---|
+| 挂载 | 独立 `LGHandleWindow : UIWindow`（透传 hitTest），`windowLevel = UIWindowLevelNormal + 75`（微珠 LCOrbitOverlayManager 同款数值），scene 变更时重建 |
+| 外观 | 50pt 圆，`UIVisualEffectView` + `UIBlurEffect`（SystemThinMaterial 深浅色自适应）+ 0.5pt 描边 + 阴影；无图标 |
+| 中心圆点 | 复用 `LGRunningLight(12)`（绿核 + 1.85s 呼吸光晕，Reduce Motion 停）：有在跑任务 → 绿呼吸；无 → `tertiaryLabelColor` 灰点常亮 |
+| 手势 | 单击/双击（`requireGestureRecognizerToFail` 协调）/长按 0.45s/拖动 pan |
+| 触觉 | impact 轻点击·吸附、中双击、重长按 |
+| 位置 | 初始右侧 y=0.72，松手吸附较近边缘，`LCGridLayout.handleSide/handleY` 持久化 |
+| 刷新 | tick 内 0.15s 节流驱动（scene 维护 + 位置 clamp），圆点状态 0.5s 节流 |
+| 确认弹窗 | 主界面长按 → 「即将关闭 x 个App后台」是/否；弹窗期间隐藏把手（level 差会盖住弹窗） |
+
 ## 0.0.1 正式版（2026-11-13）
 
 tag `v0.0.1`，commit `317d3b3`，与 beta22 **同一份源码**（dylib 体积一致 314,352 字节）。

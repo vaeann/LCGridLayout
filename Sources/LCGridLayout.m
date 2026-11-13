@@ -14,6 +14,7 @@ static NSString *const LGNames = @"LCGridLayout.showNames";
 static NSString *const LGNative = @"LCGridLayout.nativeList";
 static NSString *const LGCompactTop = @"LCGridLayout.compactTop";
 static NSString *const LGOrder = @"LCGridLayout.order";
+static NSString *const LGTitleX = @"LCGridLayout.titleX";
 static CFTimeInterval LGStartTime;
 
 static id LGGet(id object, NSString *selector) {
@@ -777,6 +778,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         [weakSelf mirrorNativeSearchText:note.object];
     }];
     self.nativeMode = [NSUserDefaults.standardUserDefaults boolForKey:LGNative];
+    self.cachedNativeTitleFrame = CGRectNull;   // nothing measured yet; drives the fast retry
     self.onAppsTab = YES;   // until the tab probe says otherwise
     [self applyMode];
     [self loadBackground];
@@ -955,16 +957,25 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // back to its own default.
 - (CGRect)lgNativeTitleFrame {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - self.lastNativeTitleProbe < 1.0) return self.cachedNativeTitleFrame;
+    // Retry fast until the first success. The first visible frame decides whether the
+    // title sits on the host's 20pt or on the 16pt fallback, and a wrong first frame
+    // is exactly the "title shifts a bit when switching to native" reported on
+    // 2026-11-13: at mount our view has no window yet and the large title is not
+    // rendered, so the probe failed and the title was drawn 4pt left of the host's.
+    // After the first success the 1s cadence is plenty.
+    CFTimeInterval interval = CGRectIsNull(self.cachedNativeTitleFrame) ? 0.15 : 1.0;
+    if (now - self.lastNativeTitleProbe < interval) return self.cachedNativeTitleFrame;
     self.lastNativeTitleProbe = now;
     UILabel *label = [self lgNativeLargeTitle];
-    self.cachedNativeTitleFrame = label
-        ? [label convertRect:label.bounds toView:self.view]
-        : CGRectNull;
-    // Copy the host's own font object: point size, weight and line height then match
-    // exactly, instead of approximating with a scaled 34pt bold (which measured 39pt
-    // tall against the host's 37pt).
+    if (!label) return self.cachedNativeTitleFrame;   // keep the last good reading
+    self.cachedNativeTitleFrame = [label convertRect:label.bounds toView:self.view];
     if (label.font && label.font.pointSize > 0) self.cachedNativeTitleFont = label.font;
+    CGFloat hostX = CGRectGetMinX(self.cachedNativeTitleFrame);
+    if (hostX > 4 && hostX < 60) {
+        // Persist: the next launch starts on the measured value instead of flashing
+        // the fallback for a fraction of a second.
+        [NSUserDefaults.standardUserDefaults setDouble:hostX forKey:LGTitleX];
+    }
     return self.cachedNativeTitleFrame;
 }
 
@@ -1025,13 +1036,13 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     // the text field itself instead of hard-coding what that inset is.
     CGFloat barX = 8;
     self.search.frame = CGRectMake(barX, contentTop, MAX(0, w - barX * 2), 48);
-    [self.search layoutIfNeeded];
+    // The title follows the host's own large title, which is the only value guaranteed
+    // to match. The search field is NOT the anchor: on iOS 26 the host title sits at
+    // 20pt while its search text starts at 16pt, so deriving the title x from the
+    // field put it 4pt left — the "shifts right a bit on switching" symptom.
     CGFloat inset = 16;
-    CGFloat fieldX = CGRectGetMinX(self.search.searchTextField.frame);
-    if (fieldX > 0 && fieldX < 40) inset = barX + fieldX;
-    // Follow the host's own large title when it can be measured. That is the only
-    // value guaranteed to match, whatever horizontal inset this iOS version uses —
-    // the host title sits right above the grid and is simply covered, not removed.
+    CGFloat savedX = [NSUserDefaults.standardUserDefaults doubleForKey:LGTitleX];
+    if (savedX > 4 && savedX < 60) inset = savedX;
     CGRect hostTitle = [self lgNativeTitleFrame];
     if (!CGRectIsNull(hostTitle)) {
         CGFloat hostX = CGRectGetMinX(hostTitle);
@@ -1478,15 +1489,49 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
            source, container]);
 
     BOOL raised = NO;
-    UISceneSession *session = sceneVC.view.window.windowScene.session;
-    if (session) {
-        @try {
-            [UIApplication.sharedApplication requestSceneSessionActivation:session
-                                                             userActivity:nil
-                                                                 options:nil
-                                                           errorHandler:nil];
-            raised = YES;
-        } @catch (__unused NSException *e) { raised = NO; }
+    // Raise, attempt 1: the floating-menu tweak's own activation. It injects
+    // orbit_activate onto the window objects (LCOrbitMultitaskUI.m:864) and uses
+    // exactly this loop when the user taps a running app in its own UI, so it is the
+    // one raise path proven to work on this setup. beta20's requestSceneSessionActivation
+    // silently no-ops for an already-connected scene, which read as "no response".
+    Class orbitRaise = NSClassFromString(@"LCOrbitMultitask");
+    SEL windowsSel = NSSelectorFromString(@"windows");
+    if (orbitRaise && [orbitRaise respondsToSelector:windowsSel]) {
+        NSArray *taskWindows = nil;
+        @try { taskWindows = ((NSArray *(*)(id, SEL))objc_msgSend)(orbitRaise, windowsSel); }
+        @catch (__unused NSException *e) { taskWindows = nil; }
+        SEL appScene = NSSelectorFromString(@"appSceneVC");
+        SEL activate = NSSelectorFromString(@"orbit_activate");
+        for (id window in taskWindows) {
+            if (![window respondsToSelector:appScene]) continue;
+            id scene = nil;
+            @try { scene = ((id (*)(id, SEL))objc_msgSend)(window, appScene); }
+            @catch (__unused NSException *e) { scene = nil; }
+            id uuid = [scene respondsToSelector:@selector(dataUUID)] ? [scene valueForKey:@"dataUUID"] : nil;
+            if (![uuid isKindOfClass:NSString.class] || ![uuid isEqualToString:container]) continue;
+            if ([window respondsToSelector:activate]) {
+                @try {
+                    ((void (*)(id, SEL))objc_msgSend)(window, activate);
+                    raised = YES;
+                    LGLog(@"Raised the running guest via LCOrbitMultitask orbit_activate");
+                } @catch (__unused NSException *e) { raised = NO; }
+            }
+            break;
+        }
+    }
+    // Raise, attempt 2: activate the existing session through public API. This cannot
+    // create a scene, but UIKit may simply ignore it for a connected one.
+    if (!raised) {
+        UISceneSession *session = sceneVC.view.window.windowScene.session;
+        if (session) {
+            @try {
+                [UIApplication.sharedApplication requestSceneSessionActivation:session
+                                                                 userActivity:nil
+                                                                     options:nil
+                                                               errorHandler:nil];
+                raised = YES;
+            } @catch (__unused NSException *e) { raised = NO; }
+        }
     }
     if (!raised) {
         [self showError:[NSString stringWithFormat:

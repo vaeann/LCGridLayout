@@ -29,6 +29,33 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta21 — 前置真的生效、标题第一帧就归位（2026-11-13）
+
+beta20 日志：`Guest already running (detected by orbit)` 反复出现，崩溃消失；但前置
+`requestSceneSessionActivation:` 对已连接的 scene **静默无效**，用户看到「没反应」。
+
+前置改走微珠自己的激活路径：`+[LCOrbitMultitask windows]` 枚举窗口 → 窗口上的
+`appSceneVC.dataUUID` 匹配容器 → 调微珠注入的 `orbit_activate`
+（`LCOrbitMultitaskUI.m:864` `class_addMethod`）。微珠自己点在跑的应用就是这条
+（`launchGuest:` 第①步），是这台设备上验证过唯一有效的前置。`requestSceneSessionActivation`
+降级为第二路，弹提示为第三路。
+
+标题偏移的根因（不是「提前画好的图」）：
+
+| | 值 | 来源 |
+|---|---|---|
+| 宿主大标题 x | **20** | 实测（`nativeTitle={{20.000000000000004,…}}`） |
+| 搜索框推出的 x | **16** | `barX(8) + searchTextField.minX(8)` |
+| beta20 挂载瞬间 | 探测失败 → 标题画在 **16** | 挂载发生在 `viewWillAppear`，当时 view 还没进 window、大标题还没渲染 |
+
+所以宫格先开时标题在 16，切到原生变 20 —— 右移 4pt，正是「一丢丢」。原生先开时
+挂载后探测已经能成功（页面早就渲染完），切宫格直接量到 20，所以严丝合缝。
+
+修法三件套：探测失败时**保留上一次成功值**（不再写回 CGRectNull）、未成功前
+**0.15s 快速重试**（成功后回 1s）、首次成功值**持久化**（`LCGridLayout.titleX`），
+下次启动第一帧就在实测值上。同时把标题与搜索框的耦合删掉——iOS 26 上宿主标题
+（20）和搜索文字（16）本来就不在同一条线上，搜索框推不出标题的位置。
+
 ## 0.0.1 beta20 — 改用微珠同款「拒绝」策略（2026-11-13）
 
 beta19 上线后**仍然崩溃**，两份 `.ips` 栈帧与第一次完全一致（`setUpAppPresenter` →

@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <unistd.h>
+#import <string.h>
 
 static NSString *const LGColumns = @"LCGridLayout.columns";
 static NSString *const LGNames = @"LCGridLayout.showNames";
@@ -1750,8 +1751,14 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 static const void *LGOverlayKey = &LGOverlayKey;
 static NSHashTable<LGGridController *> *LGOverlays;
 static NSString *LGTitle(void) {
-    NSBundle *bundle = LGGet(NSUserDefaults.class, @"lcMainBundle");
-    return [bundle localizedStringForKey:@"lc.appList.myApps" value:@"My Apps" table:nil];
+    // Called on every layout pass by the appearance hook, so resolve it once.
+    static NSString *cached;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSBundle *bundle = LGGet(NSUserDefaults.class, @"lcMainBundle");
+        cached = [bundle localizedStringForKey:@"lc.appList.myApps" value:@"My Apps" table:nil];
+    });
+    return cached;
 }
 static UIViewController *LGFindList(UIViewController *vc) {
     if (!vc || !vc.isViewLoaded || !vc.view.window || vc.view.hidden) return nil;
@@ -1773,6 +1780,84 @@ static UIViewController *LGFindList(UIViewController *vc) {
         if (found) return found;
     }
     return nil;
+}
+
+// Re-entrancy guard for the synchronous layout below: forcing layout inside a
+// layout callback would recurse.
+static BOOL LGForcingLayout = NO;
+
+// Mounting is shared by the polling tick and by the UIKit appearance hooks. The
+// hooks are the ones that matter on cold start: they run before the host page is
+// composited, so the grid is already in place for the very first frame.
+static LGGridController *LGMountOverlay(UIViewController *host) {
+    if (!host || !host.view) return nil;
+    LGGridController *grid = objc_getAssociatedObject(host, LGOverlayKey);
+    if (grid && grid.view.superview == host.view) return grid;
+    if (grid) objc_setAssociatedObject(host, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    grid = [LGGridController new];
+    [host addChildViewController:grid];
+    grid.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [host.view addSubview:grid.view];
+    // Cover the host view edge to edge: the native list may extend under the
+    // translucent tab bar, and leaving that strip uncovered leaks the unmodified
+    // rows through the glass. Content is inset by safeAreaInsets inside
+    // LGGridController instead.
+    [NSLayoutConstraint activateConstraints:@[
+        [grid.view.leadingAnchor constraintEqualToAnchor:host.view.leadingAnchor],
+        [grid.view.trailingAnchor constraintEqualToAnchor:host.view.trailingAnchor],
+        [grid.view.topAnchor constraintEqualToAnchor:host.view.topAnchor],
+        [grid.view.bottomAnchor constraintEqualToAnchor:host.view.bottomAnchor]
+    ]];
+    [grid didMoveToParentViewController:host];
+    objc_setAssociatedObject(host, LGOverlayKey, grid, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!LGOverlays) LGOverlays = [NSHashTable weakObjectsHashTable];
+    [LGOverlays addObject:grid];
+    // The overlay's own frames are only computed in viewDidLayoutSubviews. Mounting
+    // from a timer callback does not schedule one before the frame is composited,
+    // which left the first frame as an empty transparent overlay — the native list
+    // showing straight through. Lay out synchronously while the host still has a
+    // size; skip it during a layout callback, where it would recurse.
+    if (!LGForcingLayout && !CGSizeEqualToSize(host.view.bounds.size, CGSizeZero)) {
+        LGForcingLayout = YES;
+        [host.view layoutIfNeeded];
+        LGForcingLayout = NO;
+    }
+    // LC may still be loading its own list when the page first appears — the hook
+    // fires earlier than the old timer did. Only a scan that came back empty is
+    // worth repeating; reloading on every mount would make the icons blink.
+    if (grid.entries.count == 0) {
+        __weak LGGridController *weakGrid = grid;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [weakGrid refresh];
+        });
+    }
+    LGLog([NSString stringWithFormat:@"Mounted on native app-list hosting controller after %.0f ms (safe.top=%.1f navBottom=%.1f)",
+           (CFAbsoluteTimeGetCurrent() - LGStartTime) * 1000.0,
+           host.view.safeAreaInsets.top, [grid lgTopInset]]);
+    return grid;
+}
+
+// Same shape test as LGFindList, minus the on-screen requirement: the appearance
+// hooks fire before the page has a window, which is exactly the point.
+static BOOL LGIsAppListHost(UIViewController *vc) {
+    if (!vc || [vc isKindOfClass:LGGridController.class]) return NO;
+    if (!strstr(class_getName(vc.class), "HostingController")) return NO;
+    UINavigationController *nav = vc.navigationController;
+    if (!nav || nav.viewControllers.count != 1 || nav.topViewController != vc) return NO;
+    // Never claim a background tab: its page is built ahead of time and would get
+    // a grid that belongs to another screen.
+    UIViewController *child = vc;
+    UIViewController *parent = vc.parentViewController;
+    while (parent) {
+        if ([parent isKindOfClass:UITabBarController.class]) {
+            if (((UITabBarController *)parent).selectedViewController != child) return NO;
+            break;
+        }
+        child = parent;
+        parent = parent.parentViewController;
+    }
+    NSString *title = vc.navigationItem.title ?: nav.navigationBar.topItem.title;
+    return title.length == 0 || [title isEqualToString:LGTitle()];
 }
 
 static void LGDumpController(UIViewController *vc, NSUInteger depth, NSMutableString *out) {
@@ -1829,27 +1914,8 @@ static void LGTick(void) {
                 [active addObject:grid];
                 continue;
             }
-            grid = [LGGridController new];
-            [host addChildViewController:grid];
-            grid.view.translatesAutoresizingMaskIntoConstraints = NO;
-            [host.view addSubview:grid.view];
-            // Cover the host view edge to edge: the native list may extend under
-            // the translucent tab bar, and leaving that strip uncovered leaks the
-            // unmodified rows through the glass. Content is inset by safeAreaInsets
-            // inside LGGridController instead.
-            [NSLayoutConstraint activateConstraints:@[
-                [grid.view.leadingAnchor constraintEqualToAnchor:host.view.leadingAnchor],
-                [grid.view.trailingAnchor constraintEqualToAnchor:host.view.trailingAnchor],
-                [grid.view.topAnchor constraintEqualToAnchor:host.view.topAnchor],
-                [grid.view.bottomAnchor constraintEqualToAnchor:host.view.bottomAnchor]
-            ]];
-            [grid didMoveToParentViewController:host];
-            objc_setAssociatedObject(host, LGOverlayKey, grid, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [LGOverlays addObject:grid];
-            [active addObject:grid];
-            LGLog([NSString stringWithFormat:@"Mounted on native app-list hosting controller after %.0f ms (safe.top=%.1f navBottom=%.1f)",
-                   (CFAbsoluteTimeGetCurrent() - LGStartTime) * 1000.0,
-                   host.view.safeAreaInsets.top, [grid lgTopInset]]);
+            grid = LGMountOverlay(host);
+            if (grid) [active addObject:grid];
         }
     }
     for (LGGridController *grid in LGOverlays) {
@@ -1884,17 +1950,73 @@ static void LGTick(void) {
     }
 }
 
+#pragma mark - Appearance hooks (system level)
+
+// Cold start used to depend on the 16ms timer, so the host page could be
+// composited once with the native list before the overlay landed. These two UIKit
+// callbacks both run inside the pass that produces that frame: viewWillAppear:
+// precedes the first layout, and viewDidLayoutSubviews: happens while the frame is
+// being laid out. Mounting there makes the overlay part of the frame that gets
+// drawn instead of the frame after it.
+@interface UIViewController (LCGridEarlyMount)
+- (void)lg_earlyViewWillAppear:(BOOL)animated;
+- (void)lg_earlyViewDidLayoutSubviews;
+@end
+
+@implementation UIViewController (LCGridEarlyMount)
+- (void)lg_earlyViewWillAppear:(BOOL)animated {
+    [self lg_earlyViewWillAppear:animated];   // original IMP after the exchange
+    if (LGIsAppListHost(self)) LGMountOverlay(self);
+}
+- (void)lg_earlyViewDidLayoutSubviews {
+    [self lg_earlyViewDidLayoutSubviews];
+    if (!LGForcingLayout && LGIsAppListHost(self)) LGMountOverlay(self);
+}
+@end
+
+static BOOL LGWillAppearHooked = NO;
+static BOOL LGDidLayoutHooked = NO;
+
+static void LGInstallAppearanceHooks(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+    installed = YES;
+    Class cls = UIViewController.class;
+    Method will = class_getInstanceMethod(cls, @selector(viewWillAppear:));
+    Method mineWill = class_getInstanceMethod(cls, @selector(lg_earlyViewWillAppear:));
+    Method layout = class_getInstanceMethod(cls, @selector(viewDidLayoutSubviews));
+    Method mineLayout = class_getInstanceMethod(cls, @selector(lg_earlyViewDidLayoutSubviews));
+    if (will && mineWill) {
+        method_exchangeImplementations(will, mineWill);
+        LGWillAppearHooked = YES;
+    }
+    // Never invent the method when the original is missing: the replacement calls
+    // itself through that selector, so it would recurse forever.
+    if (layout && mineLayout) {
+        method_exchangeImplementations(layout, mineLayout);
+        LGDidLayoutHooked = YES;
+    }
+    // Logging is deferred to the first main-queue turn: this runs inside a dyld
+    // constructor, where file IO through NSFileManager is best left alone.
+}
+
 __attribute__((constructor)) static void LGInitialize(void) {
     @autoreleasepool {
         if (!LGHost()) return;
+        // Everything the hooks touch must exist before the first UI callback, so it
+        // is set up synchronously here rather than on the next main-queue turn.
+        LGOverlays = [NSHashTable weakObjectsHashTable];
+        LGStartTime = CFAbsoluteTimeGetCurrent();
+        [NSUserDefaults.standardUserDefaults registerDefaults:@{LGColumns:@4, LGNames:@YES, LGNative:@NO, LGCompactTop:@YES}];
+        LGInstallAppearanceHooks();
         dispatch_async(dispatch_get_main_queue(), ^{
-            LGOverlays = [NSHashTable weakObjectsHashTable];
-            LGStartTime = CFAbsoluteTimeGetCurrent();
-            [NSUserDefaults.standardUserDefaults registerDefaults:@{LGColumns:@4, LGNames:@YES, LGNative:@NO, LGCompactTop:@YES}];
-            LGLog([NSString stringWithFormat:@"Host gate passed: LiveContainer %@ (>= 3.8.0); %@ loaded; no method hooks installed", LGDetectedVersion ?: @"?", LGLoadedName()]);
-            // Public UI containment and a low-frequency foreground discovery timer.
-            // No swizzling, substrate hooks, key window replacement or gesture hooks.
-            // 0.15s discovery: a 1s poll is what made returning to the App tab show
+            LGLog([NSString stringWithFormat:@"Host gate passed: LiveContainer %@ (>= 3.8.0); %@ loaded; hooks viewWillAppear=%d viewDidLayoutSubviews=%d",
+                   LGDetectedVersion ?: @"?", LGLoadedName(), LGWillAppearHooked, LGDidLayoutHooked]);
+            // Polling is now only a safety net: the appearance hooks do the real
+            // mount before the first frame. The tick still matters for pages that
+            // never go through viewWillAppear (SwiftUI rebuilding the page under a
+            // live overlay) and for keeping the badge state fresh.
+            // 0.1s discovery: a 1s poll is what made returning to the App tab show
             // the native list for about a second before the grid reappeared.
             NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) { LGTick(); }];
             timer.tolerance = 0.03;

@@ -17,6 +17,10 @@ on:
         description: "构建成功后创建 Release"
         type: boolean
         default: true
+      prerelease:
+        description: "测试版（tag 加 -betaN）。取消勾选＝正式版，直接用版本号"
+        type: boolean
+        default: true
       note:
         description: "附加到 Release 说明末尾（可选）"
         type: string
@@ -73,6 +77,45 @@ jobs:
           echo "dylib=LCGridLayout_v${V}.dylib" >> "$GITHUB_OUTPUT"
           echo "构建目标：LCGridLayout_v${V}.dylib"
 
+      - name: 计算发布标记
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          # push 触发时 inputs 为空，按正式版处理（不会走到发版步骤）
+          IS_BETA="${{ inputs.prerelease }}"
+
+          # beta 序号按版本号独立计数：取现存 v{V}-betaN 里最大的 N 再加一，
+          # 所以 0.0.1 的第一个测试版就是 beta1。
+          # 不能用 github.run_number —— 它是仓库级累计值，跟版本无关，
+          # 前面几十次无关构建会把它推到 beta30。
+          REFS="$(gh api --paginate \
+            "repos/${{ github.repository }}/git/matching-refs/tags/v${V}-beta" \
+            --jq '.[].ref' 2>/dev/null || true)"
+          LAST="$(printf '%s\n' "$REFS" | sed -E 's#.*-beta##' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+          BETA=$(( ${LAST:-0} + 1 ))
+
+          if [ "$IS_BETA" = "true" ]; then
+            # 测试版：v0.0.1-beta1
+            LABEL="${V} beta${BETA}"
+            TAG="v${V}-beta${BETA}"
+          else
+            # 正式版：v0.0.1 —— 不带 beta，之后靠版本号递增（0.0.2、0.0.3 …）
+            LABEL="${V}"
+            TAG="v${V}"
+          fi
+
+          {
+            echo "beta=$BETA"
+            echo "is_beta=$IS_BETA"
+            echo "label=$LABEL"
+            echo "tag=$TAG"
+            echo "title=LCGridLayout v${LABEL}"
+          } >> "$GITHUB_OUTPUT"
+          echo "本次标记：${TAG}（上一个 beta：${LAST:-无}）"
+
       - name: 构建 dylib
         run: |
           set -euo pipefail
@@ -96,7 +139,7 @@ jobs:
       - name: 上传 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LCGridLayout_v${{ steps.ver.outputs.version }}_build${{ github.run_number }}
+          name: LCGridLayout_${{ steps.rel.outputs.tag }}_run${{ github.run_number }}
           path: |
             dist/${{ steps.ver.outputs.dylib }}
             dist/SHA256SUMS.txt
@@ -108,25 +151,31 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           COMMIT: ${{ github.sha }}
-          RUN: ${{ github.run_number }}
+          LABEL: ${{ steps.rel.outputs.label }}
+          IS_BETA: ${{ steps.rel.outputs.is_beta }}
           NOTE: ${{ inputs.note }}
         run: |
           set -euo pipefail
-          python3 scripts/render_release_notes.py "$VERSION" "$COMMIT" "$RUN" "$NOTE" > /tmp/notes.md
+          python3 scripts/render_release_notes.py \
+            "$VERSION" "$COMMIT" "$LABEL" "$IS_BETA" "$NOTE" > /tmp/notes.md
           cat /tmp/notes.md
 
       - name: 创建 Release
         if: github.event_name == 'workflow_dispatch' && inputs.create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          TITLE: ${{ steps.rel.outputs.title }}
+          IS_BETA: ${{ steps.rel.outputs.is_beta }}
         run: |
           set -euo pipefail
-          # Beta 阶段：tag 用 -betaN，便于和正式版区分
-          TAG="v${{ steps.ver.outputs.version }}-beta${{ github.run_number }}"
           F="dist/${{ steps.ver.outputs.dylib }}"
-          TITLE="LCGridLayout v${{ steps.ver.outputs.version }} beta (build ${{ github.run_number }})"
+          # 测试版额外标记为 prerelease，正式版不带；-beta 的命名本身也说明归属
+          FLAGS=""
+          if [ "$IS_BETA" = "true" ]; then FLAGS="--prerelease"; fi
           gh release create "$TAG" "$F" dist/SHA256SUMS.txt \
             --title "$TITLE" \
             --notes-file /tmp/notes.md \
-            --target "${{ github.sha }}"
+            --target "${{ github.sha }}" \
+            ${FLAGS:+"$FLAGS"}
           echo "Release: $TAG" >> "$GITHUB_STEP_SUMMARY"

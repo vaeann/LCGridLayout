@@ -29,6 +29,24 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.2 — 单按钮、图标与启动修复、搜索压制（2026-11-13）
+
+四条实测反馈：布局切换按钮多余、图标首帧闪一块纯色、个别 app 点了报「未能打开文件」、
+网格下双击顶部会弹出 LC 的原生搜索并把我们的搜索框盖住。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | 删除 `returnButton` / `lgUpdateSwitchButton` / `toggleMode` | 右下角只留齿轮；布局切换并入设置面板底部 |
+| 同上 | `LGSheetAction` 新增 `SwitchToGrid`；`LGSheetController.nativeMode`；`buildNativeBranchInRoot:` | 原生模式下只渲染「切换到宫格布局」+ 取消，不显示看不见效果的网格设置 |
+| 同上 | `LGFastIcon` | 除 Apple 固定文件名外，再读 `CFBundleIcons` / `CFBundleIconFiles`，最后扫 bundle 根目录里名字含 icon 的 PNG |
+| 同上 | `LGCell` 的 `lgShowIcon:animated:` / `lgShowPlaceholder` | 真实图标淡入；占位从 `app.fill`（实心块，就是那块「纯色」）换成中性色块 |
+| 同上 | `prefetchIcons` / `generateIconForEntry:` | refresh 后预取全部图标；生成完成后原地淡入可见 cell，不再 `reloadItems` |
+| 同上 | `didSelectItemAtIndexPath:` | 启动 URL 补 `container-folder-name`（`LCAppInfo.plist` 的 `LCDataUUID`）；缺它时 LC 会用别的 app 的容器，报「未能打开文件」 |
+| 同上 | `lgSuppressNativeSearch:` / `LGCollectSearchBars` | 网格模式隐藏宿主 search bar 并关掉交互，每 0.5s 复查（SwiftUI 会重建）；切回原生恢复 |
+| 同上 | `lgEnsureNavGuard` / `gestureRecognizer:shouldReceiveTouch:` | 在 `nav.view` 上吞掉导航区空白处的双击（按钮除外），阻止 LC 的 searchable 被唤起；离开网格模式时移除 |
+| 同上 | `viewDidLayoutSubviews` | 去掉 `compactTop` 的 `-44`（它会把我们的搜索框顶进导航栏）；紧凑＝紧贴栏底，宽松＝+24 |
+| `VERSION` | | 0.0.1 → 0.0.2 |
+
 ## 版本与发布标记（2026-11-13）
 
 `VERSION` 用语义化三段数字（`主.次.修订`），当前从 **0.0.1** 起步。产物名只带版本号：

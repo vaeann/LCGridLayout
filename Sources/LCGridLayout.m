@@ -117,6 +117,10 @@ static NSUserDefaults *LGAppGroupDefaults(void) {
 @property(nonatomic, copy) NSString *name;
 @property(nonatomic, copy) NSString *folder;
 @property(nonatomic, copy) NSString *bundleId;
+// LCDataUUID from LCAppInfo.plist — the data container LiveContainer would use
+// for this app by default. The native launch route needs it, otherwise it falls
+// back to whatever container another app had selected.
+@property(nonatomic, copy) NSString *container;
 @property(nonatomic) BOOL locked;
 @property(nonatomic) BOOL shared;
 @property(nonatomic) BOOL hidden;
@@ -164,6 +168,8 @@ static NSArray<LGEntry *> *LGReadApps(BOOL includeHidden) {
             entry.shared = shared;
             entry.hidden = (state == LGEntryStateHidden);
             entry.locked = [meta[@"isLocked"] boolValue];
+            id container = meta[@"LCDataUUID"];
+            if ([container isKindOfClass:NSString.class] && [container length] > 0) entry.container = container;
             entry.name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: entry.folder.stringByDeletingPathExtension;
             if (![entry.name isKindOfClass:NSString.class]) entry.name = entry.folder;
             [result addObject:entry];
@@ -194,8 +200,40 @@ static NSArray<LGEntry *> *LGReadApps(BOOL includeHidden) {
 
 // Cheap first-paint icon straight from the bundle (no IconServices rendering).
 static UIImage *LGFastIcon(LGEntry *entry) {
-    for (NSString *name in @[@"AppIcon60x60@3x.png", @"AppIcon60x60@2x.png", @"AppIcon76x76@2x~ipad.png", @"AppIcon76x76@1x~ipad.png"]) {
+    static NSArray<NSString *> *known;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        known = @[@"AppIcon60x60@3x.png", @"AppIcon60x60@2x.png",
+                  @"AppIcon76x76@2x~ipad.png", @"AppIcon76x76@1x~ipad.png"];
+    });
+    for (NSString *name in known) {
         UIImage *image = [UIImage imageWithContentsOfFile:[entry.url URLByAppendingPathComponent:name].path];
+        if (image) return image;
+    }
+    // Sideloaded IPAs don't always use Apple's file names. Reading the declared
+    // CFBundleIcons / CFBundleIconFiles covers those; missing them was what made
+    // some cells flash a solid glyph before the themed icon arrived.
+    NSDictionary *info = LGPlist([entry.url URLByAppendingPathComponent:@"Info.plist"]);
+    NSMutableArray<NSString *> *declared = [NSMutableArray new];
+    id icons = info[@"CFBundleIcons"];
+    id primary = [icons isKindOfClass:NSDictionary.class] ? icons[@"CFBundlePrimaryIcon"] : nil;
+    id primaryFiles = [primary isKindOfClass:NSDictionary.class] ? primary[@"CFBundleIconFiles"] : nil;
+    if ([primaryFiles isKindOfClass:NSArray.class]) [declared addObjectsFromArray:primaryFiles];
+    id legacyFiles = info[@"CFBundleIconFiles"];
+    if ([legacyFiles isKindOfClass:NSArray.class]) [declared addObjectsFromArray:legacyFiles];
+    for (id base in declared) {
+        if (![base isKindOfClass:NSString.class]) continue;
+        for (NSString *suffix in @[@"@3x.png", @"@2x.png", @".png"]) {
+            NSString *file = [(NSString *)base stringByAppendingString:suffix];
+            UIImage *image = [UIImage imageWithContentsOfFile:[entry.url URLByAppendingPathComponent:file].path];
+            if (image) return image;
+        }
+    }
+    // Last resort: any PNG in the bundle root whose name looks like an icon.
+    for (NSString *file in [NSFileManager.defaultManager contentsOfDirectoryAtPath:entry.url.path error:nil]) {
+        if (![file.pathExtension.lowercaseString isEqualToString:@"png"]) continue;
+        if ([file rangeOfString:@"icon" options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
+        UIImage *image = [UIImage imageWithContentsOfFile:[entry.url URLByAppendingPathComponent:file].path];
         if (image) return image;
     }
     return nil;
@@ -207,6 +245,26 @@ static BOOL LGIsSearchField(UIView *view) {
     if ([view isKindOfClass:UISearchBar.class]) return YES;
     NSString *name = NSStringFromClass(view.class);
     return [name containsString:@"SearchField"] || [name containsString:@"SearchBar"];
+}
+// Same walk, but collecting the views themselves so they can be hidden and later
+// restored. Deliberately ignores hidden/alpha: an already suppressed bar would
+// otherwise never be found again.
+static void LGCollectSearchBars(UIView *view, UIView *skip, NSMutableArray<UIView *> *result) {
+    if (!view || view == skip) return;
+    if (LGIsSearchField(view) && view.window) {
+        [result addObject:view];
+        return;
+    }
+    for (UIView *sub in view.subviews) LGCollectSearchBars(sub, skip, result);
+}
+// Anything that already handles taps itself. Used to keep our guard gestures off
+// the host's buttons and rows.
+static BOOL LGIsControlLike(UIView *view) {
+    for (UIView *v = view; v; v = v.superview) {
+        if ([v isKindOfClass:UIControl.class]) return YES;
+        if ([v isKindOfClass:UITableViewCell.class] || [v isKindOfClass:UICollectionViewCell.class]) return YES;
+    }
+    return NO;
 }
 static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSValue *> *result) {
     if (!view || view == skip || view.hidden || view.alpha < 0.01) return;
@@ -232,6 +290,8 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 @property(nonatomic, strong) UIImageView *lock;
 @property(nonatomic) BOOL showName;
 @property(nonatomic) BOOL locked;
+- (void)lgShowIcon:(UIImage *)image animated:(BOOL)animated;
+- (void)lgShowPlaceholder;
 @end
 @implementation LGCell
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -279,6 +339,28 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     [super setHighlighted:highlighted];
     self.contentView.alpha = highlighted ? 0.55 : 1;
 }
+// Icons arrive in two steps: a cheap bundle PNG on first paint, the themed icon a
+// moment later. Fading the second one in removes the hard cut that reads as a
+// flash.
+- (void)lgShowIcon:(UIImage *)image animated:(BOOL)animated {
+    if (!image) { [self lgShowPlaceholder]; return; }
+    BOOL wasBlank = self.icon.image == nil;
+    self.icon.backgroundColor = UIColor.clearColor;
+    self.icon.image = image;
+    if (animated && wasBlank) {
+        self.icon.alpha = 0;
+        [UIView animateWithDuration:0.18 animations:^{ self.icon.alpha = 1; }];
+    } else {
+        self.icon.alpha = 1;
+    }
+}
+- (void)lgShowPlaceholder {
+    // A neutral plate instead of `app.fill`: that SF glyph is a solid block and is
+    // exactly the "pure colour flash" seen before the real icon loads.
+    self.icon.image = nil;
+    self.icon.alpha = 1;
+    self.icon.backgroundColor = UIColor.tertiarySystemFillColor;
+}
 @end
 
 #pragma mark - Settings sheet
@@ -292,6 +374,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     LGSheetActionRemoveBackground,
     LGSheetActionExportLog,
     LGSheetActionSwitchMode,
+    LGSheetActionSwitchToGrid,
 };
 
 // Grouped card layout instead of a tall action sheet: every setting is one row
@@ -302,16 +385,26 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) BOOL showNames;
 @property(nonatomic) BOOL compactTop;
 @property(nonatomic) BOOL hasBackground;
+// Native list mode shows a trimmed sheet: grid settings are meaningless while the
+// grid is not on screen, only the switch back matters.
+@property(nonatomic) BOOL nativeMode;
 @property(nonatomic, copy) void (^handler)(LGSheetAction action);
+- (UIView *)headerView;
+- (void)buildNativeBranchInRoot:(UIStackView *)root;
+- (UIView *)rowWithTitle:(NSString *)title control:(UIView *)control;
+- (UIView *)cardWithRows:(NSArray<UIView *> *)rows;
+- (UIView *)separator;
+- (UIButton *)pillButton:(NSString *)title action:(SEL)action;
 @end
 
-@interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate>
+@interface LGGridController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchBarDelegate, PHPickerViewControllerDelegate, UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIView *panel;
 @property(nonatomic, strong) UIImageView *backgroundView;
 @property(nonatomic, strong) UIView *dimView;
 @property(nonatomic, strong) UICollectionView *collection;
 @property(nonatomic, strong) UISearchBar *search;
-@property(nonatomic, strong) UIButton *returnButton;
+// Single floating entry point: the settings gear. The layout switch lives inside
+// the sheet now, so only one button floats over the content.
 @property(nonatomic, strong) UIButton *settingsButton;
 @property(nonatomic, strong) UILabel *empty;
 @property(nonatomic, strong) NSArray<LGEntry *> *entries;
@@ -334,10 +427,17 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @property(nonatomic) UIEdgeInsets lastSafeInsets;
 @property(nonatomic, strong) NSMutableSet<NSString *> *pendingIcons;
 @property(nonatomic, strong) id nativeSearchObserver;
+// LiveContainer search bars we hid in grid mode, kept for restoration.
+@property(nonatomic, strong) NSHashTable<UIView *> *suppressedSearchViews;
+@property(nonatomic) CFTimeInterval lastSuppressTime;
+// Swallows double taps in the host navigation area, which would otherwise wake
+// LiveContainer's searchable and cover the grid.
+@property(nonatomic, strong) UITapGestureRecognizer *navTapGuard;
 - (CGFloat)lgTopInset;
 - (void)lgSyncLayout;
-- (void)lgUpdateSwitchButton;
-- (void)toggleMode;
+- (void)lgSuppressNativeSearch:(BOOL)suppress;
+- (void)lgEnsureNavGuard;
+- (void)prefetchIcons;
 - (void)refresh;
 @end
 
@@ -348,6 +448,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.icons = [NSCache new];
     self.icons.countLimit = 150;
     self.pendingIcons = [NSMutableSet new];
+    self.suppressedSearchViews = [NSHashTable weakObjectsHashTable];
     self.entries = @[];
     self.filtered = @[];
     self.panel = [UIView new];
@@ -392,15 +493,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.empty.textAlignment = NSTextAlignmentCenter;
     self.collection.backgroundView = self.empty;
     [self.panel addSubview:self.collection];
-    // Bottom-right pair: layout switch + settings. Both are capsules with the
-    // same fill; the switch carries text, settings is icon-only.
-    UIButtonConfiguration *switchConfig = [UIButtonConfiguration filledButtonConfiguration];
-    switchConfig.imagePadding = 6;
-    switchConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-    self.returnButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.returnButton.configuration = switchConfig;
-    [self.returnButton addTarget:self action:@selector(toggleMode) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.returnButton];
+    // A single floating button: settings. Layout switching lives in the sheet.
     UIButtonConfiguration *gearConfig = [UIButtonConfiguration filledButtonConfiguration];
     gearConfig.image = [UIImage systemImageNamed:@"gearshape.fill"];
     gearConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
@@ -446,6 +539,17 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // bounds, so viewDidLayoutSubviews never fires and the header keeps its old
 // offset (the big blank above the toolbar). Re-layout when that geometry moves.
 - (void)lgSyncLayout {
+    if (!self.nativeMode) {
+        // SwiftUI rebuilds the page (and its search bar) on tab switches; re-apply
+        // the suppression, but only a couple of times per second — the walk covers
+        // the whole window.
+        CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+        if (now - self.lastSuppressTime > 0.5) {
+            self.lastSuppressTime = now;
+            [self lgSuppressNativeSearch:YES];
+        }
+        [self lgEnsureNavGuard];
+    }
     CGFloat top = [self lgTopInset];
     UIEdgeInsets safe = self.view.safeAreaInsets;
     BOOL hasNativeSearch = !CGRectIsEmpty([self lgTopNativeSearchFrame]);
@@ -479,9 +583,10 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     BOOL hasNativeTopSearch = !CGRectIsEmpty(nativeSearch);
     self.search.hidden = hasNativeTopSearch;
     CGFloat top = [self lgTopInset] + 2;
-    // Compact mode removes the phantom large-title inset, but only when there is
-    // no native search field to sit below.
-    if (!hasNativeTopSearch && [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top = MAX(0, top - 44);
+    // Compact = flush under the navigation bar; loose adds breathing room. The old
+    // -44 compensation cancelled the large-title inset and pushed our search field
+    // up behind the bar, so it is gone.
+    if (!hasNativeTopSearch && ![NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop]) top += 24;
     if (hasNativeTopSearch) top = MAX(top, CGRectGetMaxY(nativeSearch) + 4);
     self.lastTopInset = [self lgTopInset];
     self.lastSafeInsets = safe;
@@ -505,32 +610,19 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:self.view];
         if (!CGRectIsEmpty(tabFrame)) bottomLimit = MIN(bottomLimit, CGRectGetMinY(tabFrame));
     }
-    CGFloat buttonHeight = 44, buttonGap = 10, settingsWidth = 44, switchWidth = 132;
-    CGFloat buttonY = MAX(0, bottomLimit - buttonHeight - 14);
-    CGFloat settingsX = MAX(8, w - 16 - settingsWidth);
-    self.settingsButton.frame = CGRectMake(settingsX, buttonY, settingsWidth, buttonHeight);
-    self.returnButton.frame = CGRectMake(MAX(8, settingsX - buttonGap - switchWidth), buttonY, switchWidth, buttonHeight);
+    CGFloat buttonHeight = 44, settingsWidth = 44;
+    self.settingsButton.frame = CGRectMake(MAX(8, w - 16 - settingsWidth), MAX(0, bottomLimit - buttonHeight - 14), settingsWidth, buttonHeight);
+    if (!self.nativeMode) [self lgEnsureNavGuard];
     if (resized) [self.collection.collectionViewLayout invalidateLayout];
 }
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
-    [self lgUpdateSwitchButton];
-    [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
-}
-- (void)lgUpdateSwitchButton {
-    UIButtonConfiguration *config = self.returnButton.configuration;
-    BOOL toNative = !self.nativeMode;
-    config.title = toNative ? @"原生布局" : @"宫格布局";
-    config.image = [UIImage systemImageNamed:(toNative ? @"list.bullet" : @"square.grid.3x3.fill")];
-    self.returnButton.configuration = config;   // struct: reassign to apply
-    self.returnButton.accessibilityLabel = toNative ? @"切换到原生布局" : @"切换到宫格布局";
-}
-- (void)toggleMode {
-    if (self.nativeMode) {
-        [self showGrid];
-    } else {
-        [self showNative];
+    [self lgSuppressNativeSearch:!self.nativeMode];
+    if (self.nativeMode && self.navTapGuard) {
+        [self.navTapGuard.view removeGestureRecognizer:self.navTapGuard];
+        self.navTapGuard = nil;
     }
+    [NSUserDefaults.standardUserDefaults setBool:self.nativeMode forKey:LGNative];
 }
 - (void)showNative { [self.view endEditing:YES]; self.nativeMode = YES; [self applyMode]; }
 - (void)showGrid { self.nativeMode = NO; [self applyMode]; [self refresh]; }
@@ -540,9 +632,20 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     // tab switch, which is what made returning to this page stall for ~1s.
     [self filter];
     [self.collection.refreshControl endRefreshing];
+    [self prefetchIcons];
     LGLog([NSString stringWithFormat:@"Loaded %lu app(s); skipped hidden=%lu ambiguous=%lu damaged=%lu",
            (unsigned long)self.entries.count, (unsigned long)LGCountHidden,
            (unsigned long)LGCountAmbiguous, (unsigned long)LGCountDamaged]);
+}
+// Generate themed icons for everything currently listed, one per run-loop turn.
+// Without this each cell had to wait for the generator on first display, which is
+// when the placeholder plate was visible.
+- (void)prefetchIcons {
+    for (LGEntry *entry in self.filtered) {
+        NSString *key = [self iconKeyForEntry:entry];
+        if ([self.icons objectForKey:key]) continue;
+        [self requestIconForEntry:entry key:key];
+    }
 }
 - (void)filter {
     NSString *query = self.search.text ?: @"";
@@ -569,12 +672,12 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     NSString *key = [self iconKeyForEntry:entry];
     UIImage *icon = [self.icons objectForKey:key];
     if (icon) {
-        cell.icon.image = icon;
+        [cell lgShowIcon:icon animated:NO];
     } else {
-        // First frame: use the bundle's own PNG (a few ms) instead of blocking on
-        // IconServices. The themed icon is generated one per run-loop turn below.
-        UIImage *fast = LGFastIcon(entry);
-        cell.icon.image = fast ?: [UIImage systemImageNamed:@"app.fill"];
+        // First frame: the bundle's own PNG (a few ms) instead of blocking on
+        // IconServices. The themed icon replaces it one run-loop turn later, and
+        // fades in so the swap is not a visible flash.
+        [cell lgShowIcon:LGFastIcon(entry) animated:NO];
         [self requestIconForEntry:entry key:key];
     }
     [cell setNeedsLayout];
@@ -612,9 +715,11 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     NSUInteger index = [self.filtered indexOfObjectPassingTest:^BOOL(LGEntry *candidate, NSUInteger idx, BOOL *stop) {
         return [candidate.url.path isEqualToString:entry.url.path];
     }];
-    if (index != NSNotFound) {
-        [self.collection reloadItemsAtIndexPaths:@[[NSIndexPath indexPathForItem:index inSection:0]]];
-    }
+    if (index == NSNotFound) return;
+    // Update in place with a fade instead of reloading the row: a reload swapped the
+    // image in one frame, which is what made the change look like a flash.
+    LGCell *visible = (LGCell *)[self.collection cellForItemAtIndexPath:[NSIndexPath indexPathForItem:index inSection:0]];
+    if (visible) [visible lgShowIcon:icon animated:YES];
 }
 - (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
     LGEntry *entry = self.filtered[indexPath.item];
@@ -634,8 +739,17 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     NSURLComponents *components = [NSURLComponents new];
     components.scheme = scheme;
     components.host = @"livecontainer-launch";
-    components.queryItems = @[[NSURLQueryItem queryItemWithName:@"bundle-name" value:entry.folder]];
+    NSMutableArray<NSURLQueryItem *> *items = [NSMutableArray arrayWithObject:
+        [NSURLQueryItem queryItemWithName:@"bundle-name" value:entry.folder]];
+    // Pass the app's own data container. Without it LiveContainer falls back to
+    // whatever container was last selected for another app, and the guest can fail
+    // to open ("未能打开文件…") on apps whose LCDataUUID is not the global default.
+    if (entry.container.length > 0) {
+        [items addObject:[NSURLQueryItem queryItemWithName:@"container-folder-name" value:entry.container]];
+    }
+    components.queryItems = items;
     NSURL *url = components.URL;
+    LGLog([NSString stringWithFormat:@"Launching %@ (container=%@)", entry.folder, entry.container ?: @"(default)"]);
     if (!url) return;
     [self.view endEditing:YES];
     [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
@@ -975,11 +1089,70 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 - (void)dealloc {
     if (self.nativeSearchObserver) [NSNotificationCenter.defaultCenter removeObserver:self.nativeSearchObserver];
+    [self.navTapGuard.view removeGestureRecognizer:self.navTapGuard];
+    // Never leave the host with a hidden search bar.
+    [self lgSuppressNativeSearch:NO];
 }
 - (void)setHiddenUnlocked:(BOOL)unlocked {
     _hiddenUnlocked = unlocked;
     [self refresh];
     LGLog(@"Hidden apps unlocked for this session");
+}
+
+#pragma mark - Host search suppression / navigation guard
+
+// LiveContainer's searchable sits in the navigation area. A double tap up there
+// wakes it and its presentation covers our own search field, so the grid loses both
+// its search bar and the space it occupied. Hiding the bar removes the entry point;
+// the original state is restored in native mode.
+- (void)lgSuppressNativeSearch:(BOOL)suppress {
+    if (suppress) {
+        UIWindow *window = self.view.window;
+        if (!window) return;
+        NSMutableArray<UIView *> *bars = [NSMutableArray array];
+        LGCollectSearchBars(window.rootViewController.view, self.view, bars);
+        BOOL changed = NO;
+        for (UIView *bar in bars) {
+            if (bar.hidden && !bar.userInteractionEnabled) continue;
+            [self.suppressedSearchViews addObject:bar];
+            bar.hidden = YES;
+            bar.userInteractionEnabled = NO;
+            changed = YES;
+        }
+        // The native field no longer reserves space at the top, so our own header has
+        // to move up; without this the grid keeps the old offset for a frame.
+        if (changed) [self.view setNeedsLayout];
+    } else {
+        for (UIView *bar in self.suppressedSearchViews.allObjects) {
+            bar.hidden = NO;
+            bar.userInteractionEnabled = YES;
+        }
+        if (self.suppressedSearchViews.count > 0) [self.view setNeedsLayout];
+        [self.suppressedSearchViews removeAllObjects];
+    }
+}
+
+// Swallow double taps in the host navigation area. Buttons are excluded so ➕ / ❓ /
+// 🔗 / 排序 keep their single-tap behaviour; the guard only eats taps that land on
+// blank navigation chrome.
+- (void)lgEnsureNavGuard {
+    if (self.nativeMode) return;
+    UIView *navView = self.navigationController.view;
+    if (!navView) return;
+    if (self.navTapGuard.view == navView) return;
+    [self.navTapGuard.view removeGestureRecognizer:self.navTapGuard];
+    self.navTapGuard = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(lgNavTapGuardFired:)];
+    self.navTapGuard.numberOfTapsRequired = 2;
+    self.navTapGuard.cancelsTouchesInView = YES;
+    self.navTapGuard.delegate = self;
+    [navView addGestureRecognizer:self.navTapGuard];
+}
+- (void)lgNavTapGuardFired:(UITapGestureRecognizer *)gesture {
+    LGLog(@"Swallowed a double tap in the host navigation area");
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (gestureRecognizer != self.navTapGuard) return YES;
+    return !LGIsControlLike(touch.view);
 }
 
 - (void)mirrorNativeSearchText:(id)object {
@@ -996,11 +1169,14 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)showSettings {
     if (self.presentedViewController) return;
     LGSheetController *sheet = [LGSheetController new];
-    sheet.summary = [NSString stringWithFormat:@"共 %lu 个应用 · 隐藏 %lu · 冲突 %lu · 异常 %lu",
-                     (unsigned long)self.entries.count,
-                     (unsigned long)LGCountHidden,
-                     (unsigned long)LGCountAmbiguous,
-                     (unsigned long)LGCountDamaged];
+    sheet.nativeMode = self.nativeMode;
+    sheet.summary = self.nativeMode
+        ? @"原生列表模式下，网格设置暂不可用"
+        : [NSString stringWithFormat:@"共 %lu 个应用 · 隐藏 %lu · 冲突 %lu · 异常 %lu",
+           (unsigned long)self.entries.count,
+           (unsigned long)LGCountHidden,
+           (unsigned long)LGCountAmbiguous,
+           (unsigned long)LGCountDamaged];
     sheet.columns = [NSUserDefaults.standardUserDefaults integerForKey:LGColumns];
     sheet.showNames = [NSUserDefaults.standardUserDefaults boolForKey:LGNames];
     sheet.compactTop = [NSUserDefaults.standardUserDefaults boolForKey:LGCompactTop];
@@ -1056,6 +1232,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         }
         case LGSheetActionSwitchMode:
             [self showNative];
+            break;
+        case LGSheetActionSwitchToGrid:
+            [self showGrid];
             break;
     }
 }
@@ -1272,6 +1451,11 @@ __attribute__((constructor)) static void LGInitialize(void) {
     [root addArrangedSubview:summary];
     [root setCustomSpacing:6 afterView:summary];
 
+    if (self.nativeMode) {
+        [self buildNativeBranchInRoot:root];
+        return;
+    }
+
     UISegmentedControl *columns = [[UISegmentedControl alloc] initWithItems:@[@"4 列", @"5 列"]];
     columns.selectedSegmentIndex = self.columns == 5 ? 1 : 0;
     [columns addTarget:self action:@selector(columnsChanged:) forControlEvents:UIControlEventValueChanged];
@@ -1323,9 +1507,37 @@ __attribute__((constructor)) static void LGInitialize(void) {
     [root addArrangedSubview:switchMode];
 }
 
+// Native mode: one action, no grid options.
+- (void)buildNativeBranchInRoot:(UIStackView *)root {
+    UILabel *hint = [UILabel new];
+    hint.text = @"当前显示的是原生列表。宫格布局的设置项等切回宫格后再调整。";
+    hint.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    hint.textColor = UIColor.secondaryLabelColor;
+    hint.numberOfLines = 0;
+    hint.adjustsFontForContentSizeCategory = YES;
+    [root addArrangedSubview:hint];
+    [root setCustomSpacing:20 afterView:hint];
+
+    UIButton *switchMode = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+    config.title = @"切换到宫格布局";
+    config.image = [UIImage systemImageNamed:@"square.grid.3x3.fill"];
+    config.imagePadding = 8;
+    config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+    switchMode.configuration = config;
+    [switchMode.heightAnchor constraintEqualToConstant:52].active = YES;
+    [switchMode addTarget:self action:@selector(switchTapped) forControlEvents:UIControlEventTouchUpInside];
+    [root addArrangedSubview:switchMode];
+
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    [cancel setTitle:@"取消" forState:UIControlStateNormal];
+    [cancel addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [root addArrangedSubview:cancel];
+}
+
 - (UIView *)headerView {
     UILabel *title = [UILabel new];
-    title.text = @"网格设置";
+    title.text = self.nativeMode ? @"布局" : @"网格设置";
     title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
     title.adjustsFontForContentSizeCategory = YES;
     [title setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -1424,7 +1636,9 @@ __attribute__((constructor)) static void LGInitialize(void) {
 - (void)chooseTapped { [self fire:LGSheetActionChooseBackground dismiss:YES]; }
 - (void)removeTapped { [self fire:LGSheetActionRemoveBackground dismiss:YES]; }
 - (void)exportTapped { [self fire:LGSheetActionExportLog dismiss:YES]; }
-- (void)switchTapped { [self fire:LGSheetActionSwitchMode dismiss:YES]; }
+- (void)switchTapped {
+    [self fire:(self.nativeMode ? LGSheetActionSwitchToGrid : LGSheetActionSwitchMode) dismiss:YES];
+}
 
 @end
 

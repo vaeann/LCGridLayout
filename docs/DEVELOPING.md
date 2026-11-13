@@ -92,7 +92,8 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 覆盖层 | `LGPassView` | `hitTest` 返回 nil，让触摸穿透到宿主 |
 | 主控 | `LGGridController` | 全部 UI、交互、持久化 |
 | 挂载 | `LGTick` / `LGFindList` / `LGDumpWindows` | 找页、挂载、置顶、诊断 |
-| 搜索嗅探 | `LGCollectSearchFields` / `mirrorNativeSearchText` | 发现宿主自带搜索框并镜像输入 |
+| 搜索压制 | `lgSuppressNativeSearch:` / `LGCollectSearchBars` | 网格模式把宿主 search bar 设为 `hidden` + 关交互，每 0.5s 复查一次（SwiftUI 会重建） |
+| 双击守卫 | `lgEnsureNavGuard` / `gestureRecognizer:shouldReceiveTouch:` | 在 `nav.view` 上吞掉导航区空白处的双击，避开按钮；否则 LC 的 searchable 会盖住整页 |
 
 ### 主控里的分区
 
@@ -110,8 +111,10 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 排序 | `saveOrder` / `moveItemAtIndexPath` | 存 folder 名数组；宿主已选 custom 时同步镜像 |
 | 解锁 | `footerTapped` / `setHiddenUnlocked` | 三击 → `LAContext` 认证 |
 | 设置 | `showSettings` + `LGSheetController` | 卡片式 sheet（medium/large detent）：分段控件管列数与间距，开关管名称，按钮管背景与日志 |
-| 布局切换 | `toggleMode` / `lgUpdateSwitchButton` | 右下角胶囊，文案与图标反映*目标*模式；挂在 `self.view` 上，两种模式都可见。**不要试图改宿主 navigationItem——SwiftUI 自绘，塞进去不显示** |
-| 设置入口 | `showSettings` / `LGSheetController` | 齿轮按钮 → 分组卡片面板：分段控件管列数/间距，开关管名称，圆角按钮管背景与日志 |
+| 设置入口 | `showSettings` / `LGSheetController` | 右下角唯一悬浮按钮（齿轮）→ 分组卡片面板；`nativeMode=YES` 时只渲染「切换到宫格布局」+ 取消 |
+| 布局切换 | `handleSheetAction:` 的 `SwitchMode` / `SwitchToGrid` | 从面板底部按钮触发，不再有独立的悬浮切换按钮。**不要试图改宿主 navigationItem——SwiftUI 自绘，塞进去不显示** |
+| 图标 | `LGFastIcon` / `requestIconForEntry:` / `lgShowIcon:animated:` | 先给 bundle 里的 PNG，再淡入宿主渲染的图标；`prefetchIcons` 在 refresh 后预取，占位是中性色块而不是 `app.fill` |
+| 启动 | `didSelectItemAtIndexPath:` | `bundle-name` + `container-folder-name`（来自 `LCAppInfo.plist` 的 `LCDataUUID`）。少了容器名，LC 会拿别的 app 的容器去开，报「未能打开文件」 |
 | 覆盖范围 | — | 网格只覆盖 `host.view`（= 搜索栏 + app 列表）。导航栏在 `nav.view` 上，天然不被覆盖 |
 | 背景 | `chooseBackground` / `applyBackground` / `removeBackground` | PHPicker，最长边压到 2200px 存 JPEG |
 

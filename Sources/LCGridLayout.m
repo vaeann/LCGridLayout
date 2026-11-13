@@ -606,6 +606,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (BOOL)lgShouldUseMultitask:(LGEntry *)entry;
 - (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry;
 - (void)lgUpdateTabVisibility;
+- (void)lgUpdateTabVisibilityForce:(BOOL)force;
 - (NSNumber *)lgAppsTabState;
 - (NSString *)lgAppsTabTitle;
 - (NSNumber *)lgSelectedTabViaAccessibility:(NSString *)apps;
@@ -667,7 +668,10 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.titleLabel = [UILabel new];
     self.titleLabel.text = @"App";
     // Explicit bold: preferredFontForTextStyle does not guarantee the nav-bar weight.
-    UIFont *titleBase = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
+    // 31pt bold, not the 34pt used by older iOS: the host's own large title measured
+    // 31pt / 37pt tall on iOS 26 (navLabels="App" 31pt), and matching it removes the
+    // size step that was visible when toggling layouts.
+    UIFont *titleBase = [UIFont systemFontOfSize:31 weight:UIFontWeightBold];
     self.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleLargeTitle] scaledFontForFont:titleBase];
     self.titleLabel.adjustsFontForContentSizeCategory = YES;
     self.titleLabel.textColor = UIColor.labelColor;
@@ -866,7 +870,15 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     }
     CGFloat buttonHeight = 44, settingsWidth = 44;
     self.switchButton.frame = CGRectMake(MAX(8, w - 16 - settingsWidth), MAX(0, bottomLimit - buttonHeight - 14), settingsWidth, buttonHeight);
-    [self lgUpdateTabVisibility];
+    // Forced, not throttled: when the Apps tab comes back this is the first thing
+    // that runs, and the panel has to be visible again in this same frame or the
+    // native list paints once underneath it.
+    [self lgUpdateTabVisibilityForce:YES];
+    // SwiftUI re-inserts its page view when a tab returns, which can put it above the
+    // overlay until the next tick; do it here so the frame is already correct.
+    if (self.view.superview && self.view.superview.subviews.lastObject != self.view) {
+        [self.view.superview bringSubviewToFront:self.view];
+    }
     if (self.onAppsTab) {
         if (!self.nativeMode) [self lgEnsureNavGuard];
         [self lgFreezeHostContent:!self.nativeMode];
@@ -954,7 +966,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // just these three without a full layout pass.
 - (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe {
     CGFloat titleHeight = ceil(self.titleLabel.font.lineHeight);
-    CGFloat contentTop = top + 8 + titleHeight + 6;
+    // +13, not +8: the host large title sits at y=119.33 with our top at 106
+    // (measured 2026-11-13), and +8 put ours 5pt higher.
+    CGFloat contentTop = top + 13 + titleHeight + 6;
     self.search.hidden = !self.searchRevealed;
     // The host list keeps everything on one 16pt vertical line: large title, search
     // field and row content all start there. UISearchBar adds its own inset inside
@@ -974,7 +988,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         CGFloat hostX = CGRectGetMinX(hostTitle);
         if (hostX > 4 && hostX < 60) inset = hostX;
     }
-    self.titleLabel.frame = CGRectMake(inset, top + 8, MAX(0, w - inset * 2), titleHeight);
+    self.titleLabel.frame = CGRectMake(inset, top + 13, MAX(0, w - inset * 2), titleHeight);
     CGFloat headerHeight = self.searchRevealed ? 48 : 0;
     CGFloat footerHeight = MAX(24, self.footer.font.lineHeight + 2);
     CGFloat footerGap = 14;
@@ -1111,8 +1125,12 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 }
 
 - (void)lgUpdateTabVisibility {
+    [self lgUpdateTabVisibilityForce:NO];
+}
+
+- (void)lgUpdateTabVisibilityForce:(BOOL)force {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - self.lastTabCheck < 0.15) return;
+    if (!force && now - self.lastTabCheck < 0.15) return;
     self.lastTabCheck = now;
     NSNumber *state = [self lgAppsTabState];
     BOOL onApps = state ? state.boolValue : YES;

@@ -98,9 +98,12 @@ jobs:
           BETA=$(( ${LAST:-0} + 1 ))
 
           if [ "$IS_BETA" = "true" ]; then
-            # 测试版：v0.0.1-beta1
-            LABEL="${V} beta${BETA}"
-            TAG="v${V}-beta${BETA}"
+            # 测试版：v0.0.1-beta01。补零到两位，因为 GitHub 的 releases 列表按 tag 名
+            # 字典序排，不补零时 beta9 > beta13，beta10 以后会插到 beta2 前面。
+            # 序号本身仍按版本独立计数（beta01、beta02 … beta99）。
+            PADDED="$(printf '%02d' "$BETA")"
+            LABEL="${V} beta${PADDED}"
+            TAG="v${V}-beta${PADDED}"
           else
             # 正式版：v0.0.1 —— 不带 beta，之后靠版本号递增（0.0.2、0.0.3 …）
             LABEL="${V}"

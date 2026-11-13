@@ -29,6 +29,25 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta14 — 标题对齐到实测基线、切 tab 不闪（2026-11-13）
+
+beta13 实测日志（pid=3800 / 3815）给出了两个关键值：
+
+```
+title      = {{20, 114.33}, {390, 39}}      ← 宫格
+nativeTitle= {{20.0, 119.33}, {59.67, 37}}  ← 宿主大标题
+navLabels="App" 31pt ...
+```
+
+水平已对齐（20 = 20），垂直差 5pt，字号 34 vs 31。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `loadView` | 标题基础字号 34 → **31**（仍 bold），与宿主大标题一致 |
+| 同上 | `lgLayoutContentWithWidth` | 标题 y `top + 8` → **`top + 13`**，`contentTop` 同步（否则标题底边压到搜索栏） |
+| 同上 | `viewDidLayoutSubviews` | 改为 `lgUpdateTabVisibilityForce:YES`（跳过 0.15s 节流）。切回 App 页时 SwiftUI 一 layout 就恢复 panel，不再等下一次 tick；同时补一次 `bringSubviewToFront` |
+| `.github/workflows/build.yml` | 计算发布标记 | tag 改为 `%02d` 补零：`v0.0.1-beta01`。GitHub 的 releases 列表按 tag 名字典序排，不补零时 `beta9 > beta13`，beta10 以后会插到 beta2 前面 |
+
 ## 0.0.1 beta13 — 覆盖层跟随 tab、边距统一 16pt（2026-11-13）
 
 beta12 实测：四个 tab 都能看到按钮，宫格模式下切到其他 tab 会被宫格整页盖住。

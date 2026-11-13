@@ -2259,7 +2259,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         case LGSheetActionToggleHideNative: {
             BOOL hidden = [NSUserDefaults.standardUserDefaults boolForKey:LGHideNative];
             [NSUserDefaults.standardUserDefaults setBool:!hidden forKey:LGHideNative];
-            LGLog(@"Native multitask chrome hide -> %d", !hidden);
+            LGLog([NSString stringWithFormat:@"Native multitask chrome hide -> %d", !hidden]);
             if (hidden) {
                 // 关掉：dock 由下一个 tick 还原；窗口按钮立即重放 LC 的布局
                 // 恢复（此时 hook 只调原实现）。开着的方向无需动作：下一个

@@ -29,6 +29,21 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta4 — 冻结宿主列表，断掉搜索展开的源头（2026-11-13）
+
+截图确认：展开出来的空白是**导航栏被拉高**，我们的面板跟着 `navBarBottom` 一起下移。
+真正触发它的是原生列表自己的手势（双击 / 滚到顶），那层在覆盖层**下面**，
+挂在 `nav.view` 上的守卫根本不在同一条链路上——所以之前两版都没拦住。
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | 新增 `lgFreezeHostContent:` | 宫格显示期间，把 `host.view` 里除自己以外的子视图 `userInteractionEnabled = NO`，并关掉 `host.view` 上的所有手势；切回原生/卸载时逐项恢复。列表在覆盖层下本来就不该接收输入 |
+| 同上 | 新增 `lgFreezeScrollViewsIn:` | 递归找出 `scrollsToTop == YES` 的滚动视图并关掉。这是独立于触摸的系统通路，「滚到顶」正是展开搜索框的动作 |
+| 同上 | `applyMode` / `lgSyncLayout` / `dealloc` | 分别做初始冻结、每 0.5s 复审（SwiftUI 会重建列表）、恢复 |
+| `VERSION` | | 不变（0.0.1，beta 序号 +1） |
+
+保留 beta3 的 `requireGestureRecognizerToFail:` 与 `searchController.active = NO` 作为第二层兜底。
+
 ## 0.0.1 beta3 — 搜索彻底压死、启动链路对齐微珠（2026-11-13）
 
 | 文件 | 位置 | 改动 |

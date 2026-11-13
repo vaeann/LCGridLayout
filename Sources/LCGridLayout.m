@@ -447,6 +447,13 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // Swallows double taps in the host navigation area, which would otherwise wake
 // LiveContainer's searchable and cover the grid.
 @property(nonatomic, strong) UITapGestureRecognizer *navTapGuard;
+// While the grid covers the page, the native list underneath must not react to
+// anything: the "expand search" state is reached through the list's own gestures
+// (double tap / scroll to top), which live below our overlay and are therefore out
+// of reach for a guard attached to the navigation bar.
+@property(nonatomic, strong) NSHashTable<UIView *> *hostDisabledViews;
+@property(nonatomic, strong) NSHashTable<UIGestureRecognizer *> *hostDisabledGestures;
+@property(nonatomic, strong) NSHashTable<UIScrollView *> *hostFrozenScrollViews;
 - (CGFloat)lgTopInset;
 - (void)lgSyncLayout;
 - (void)lgSuppressNativeSearch:(BOOL)suppress;
@@ -456,6 +463,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgLaunchEntry:(LGEntry *)entry;
 - (void)lgCollapseHostSearchIfNeeded;
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
+- (void)lgFreezeHostContent:(BOOL)freeze;
 - (void)refresh;
 @end
 
@@ -467,6 +475,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     self.icons.countLimit = 150;
     self.pendingIcons = [NSMutableSet new];
     self.suppressedSearchViews = [NSHashTable weakObjectsHashTable];
+    self.hostDisabledViews = [NSHashTable weakObjectsHashTable];
+    self.hostDisabledGestures = [NSHashTable weakObjectsHashTable];
+    self.hostFrozenScrollViews = [NSHashTable weakObjectsHashTable];
     self.entries = @[];
     self.filtered = @[];
     self.panel = [UIView new];
@@ -565,6 +576,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         if (now - self.lastSuppressTime > 0.5) {
             self.lastSuppressTime = now;
             [self lgSuppressNativeSearch:YES];
+            [self lgFreezeHostContent:YES];
             [self lgCollapseHostSearchIfNeeded];
             [self lgAdoptHostDoubleTaps:self.navigationController.view];
         }
@@ -638,6 +650,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)applyMode {
     self.panel.hidden = self.nativeMode;
     [self lgSuppressNativeSearch:!self.nativeMode];
+    [self lgFreezeHostContent:!self.nativeMode];
     if (self.nativeMode && self.navTapGuard) {
         [self.navTapGuard.view removeGestureRecognizer:self.navTapGuard];
         self.navTapGuard = nil;
@@ -1170,6 +1183,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self.navTapGuard.view removeGestureRecognizer:self.navTapGuard];
     // Never leave the host with a hidden search bar.
     [self lgSuppressNativeSearch:NO];
+    [self lgFreezeHostContent:NO];
 }
 - (void)setHiddenUnlocked:(BOOL)unlocked {
     _hiddenUnlocked = unlocked;
@@ -1248,6 +1262,56 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         [stack addObjectsFromArray:view.subviews];
     }
     if (adopted > 0) LGLog([NSString stringWithFormat:@"Nav guard adopted %lu host double tap(s)", (unsigned long)adopted]);
+}
+
+// The expanded-search state is not a navigation-bar gesture: LiveContainer's own
+// list reacts to a double tap / scroll-to-top and asks the search field to reveal,
+// which grows the navigation bar and pushes everything down. Our overlay sits on
+// top of that list, so the only reliable fix is to take the list's input away while
+// the grid is showing. Everything recorded here is restored when the grid hides.
+- (void)lgFreezeHostContent:(BOOL)freeze {
+    UIView *host = self.view.superview;
+    if (!host) return;
+    if (freeze) {
+        for (UIView *sub in host.subviews) {
+            if (sub == self.view) continue;          // never touch our own overlay
+            if (!sub.userInteractionEnabled) continue;
+            [self.hostDisabledViews addObject:sub];
+            sub.userInteractionEnabled = NO;
+            [self lgFreezeScrollViewsIn:sub];
+        }
+        for (UIGestureRecognizer *gesture in host.gestureRecognizers) {
+            if (!gesture.enabled) continue;
+            [self.hostDisabledGestures addObject:gesture];
+            gesture.enabled = NO;
+        }
+    } else {
+        for (UIView *view in self.hostDisabledViews.allObjects) view.userInteractionEnabled = YES;
+        for (UIGestureRecognizer *gesture in self.hostDisabledGestures.allObjects) gesture.enabled = YES;
+        for (UIScrollView *scroll in self.hostFrozenScrollViews.allObjects) scroll.scrollsToTop = YES;
+        [self.hostDisabledViews removeAllObjects];
+        [self.hostDisabledGestures removeAllObjects];
+        [self.hostFrozenScrollViews removeAllObjects];
+    }
+}
+
+// `scrollsToTop` is a separate system path: it can scroll the list even when the
+// view does not receive the touch itself, and scrolling to the top is exactly what
+// reveals the native search field.
+- (void)lgFreezeScrollViewsIn:(UIView *)root {
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    NSUInteger visited = 0;
+    while (stack.count > 0 && visited < 400) {
+        UIView *view = stack.lastObject;
+        [stack removeLastObject];
+        visited++;
+        if ([view isKindOfClass:UIScrollView.class] && ((UIScrollView *)view).scrollsToTop) {
+            UIScrollView *scroll = (UIScrollView *)view;
+            [self.hostFrozenScrollViews addObject:scroll];
+            scroll.scrollsToTop = NO;
+        }
+        [stack addObjectsFromArray:view.subviews];
+    }
 }
 
 // Second layer: if the search UI still went active (SwiftUI can drive it without a

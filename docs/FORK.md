@@ -29,6 +29,17 @@ AGPL-3.0 第 5(a) 条要求衍生作品标注修改并给出日期。以下是�
 | 2026-11-08 | `docs/DEVELOPING.md` | 新增。架构地图与二次开发入口 |
 | 2026-11-08 | `README.md` | 顶部加入衍生作品声明与改动入口 |
 
+## 0.0.1 beta7 — 顶部锚点改按钮行、运行状态角标（2026-11-13）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `Sources/LCGridLayout.m` | `lgTopInset` | 不再用「整条 bar 高度 - 52」的估算。改为扫描 `UINavigationBar` 子视图，取高度 38–52、宽度 ≥70% 的那一行的**最小底边**＝按钮行。大标题展开、搜索展开都不会再留白 |
+| 同上 | `LGRunningGuest` / `LGCanCloseGuests` / `LGCloseGuestEntry` | 运行状态取 `LCSharedUtils.getContainerUsingLCSchemeWithFolderName:`（非空＝容器被占用）；关闭走 `LCOrbitMultitask closeGuest:error:`，不存在该类的 LC 上不显示红叉 |
+| 同上 | `LGCell` | 新增 `runningLight`（12pt，绿核 + 呼吸光晕，`UIAccessibilityReduceMotion` 时停动画）与 `closeBadge`（自绘红底白叉，24pt 热区）；位置分别是图标右下 / 右上 |
+| 同上 | `scrollViewDidScroll` 之外的 `lgSyncLayout` | 每 1s 刷新可见 cell 的运行状态 |
+| 同上 | `gestureRecognizer:shouldReceiveTouch:` | 长按落在红叉上时不再触发拖动/菜单 |
+| `VERSION` | | 不变（0.0.1，beta 序号 +1） |
+
 ## 0.0.1 beta6 — 单按钮双手势、标题加粗上移、日志行去卡片（2026-11-13）
 
 | 文件 | 位置 | 改动 |

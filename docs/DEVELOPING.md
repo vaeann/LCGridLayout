@@ -88,6 +88,7 @@ __attribute__((constructor)) LGInitialize            ← dylib 被 dlopen 时
 | 数据 | `LGReadApps` | 扫两个目录，产出 `NSArray<LGEntry *>` |
 | 状态判定 | `LGStateFor` / `LGEntryStateFor` | 一个应用是 OK / 隐藏 / 损坏，**唯一真源**，模糊即 fail-closed |
 | 顶部 | `titleLabel` / `searchRevealed` | 自绘「App」大标题（`UIFontTextStyleLargeTitle`）；搜索栏默认隐藏，`scrollViewDidScroll:` 下拉展开、上滑收起 |
+| 运行角标 | `LGRunningGuest` / `lgRefreshRunningBadges` | 每秒查一次容器占用；绿点＝运行中，红叉＝关闭（依赖 `LCOrbitMultitask`，没有就只显示绿点） |
 | 图标 | `LGFastIcon` / `requestIconForEntry` / `generateIconForEntry` | 先 bundle PNG 占位，再逐个换宿主主题图标 |
 | 单元格 | `LGCell` | 图标 + 名称 + 锁标；`layoutSubviews` 里算尺寸 |
 | 覆盖层 | `LGPassView` | `hitTest` 返回 nil，让触摸穿透到宿主 |

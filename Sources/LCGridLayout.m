@@ -298,12 +298,97 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
 }
 @end
 
+// Running state. LC exposes the container owner as a URL scheme; a non-empty answer
+// means some LiveContainer instance is holding that container, i.e. the guest is up.
+static BOOL LGRunningGuest(NSString *container) {
+    if (container.length == 0) return NO;
+    Class utils = NSClassFromString(@"LCSharedUtils");
+    SEL selector = NSSelectorFromString(@"getContainerUsingLCSchemeWithFolderName:");
+    if (!utils || ![utils respondsToSelector:selector]) return NO;
+    id owner = nil;
+    @try { owner = ((id (*)(id, SEL, id))objc_msgSend)(utils, selector, container); }
+    @catch (__unused NSException *e) { return NO; }
+    return [owner isKindOfClass:NSString.class] && ((NSString *)owner).length > 0;
+}
+
+// Closing a running guest needs the multitask layer. Stock LC has no such call, so the
+// X badge only appears where it can actually do something.
+static BOOL LGCanCloseGuests(void) {
+    Class multitask = NSClassFromString(@"LCOrbitMultitask");
+    return multitask && [multitask respondsToSelector:NSSelectorFromString(@"closeGuest:error:")];
+}
+static BOOL LGCloseGuestEntry(LGEntry *entry) {
+    Class multitask = NSClassFromString(@"LCOrbitMultitask");
+    SEL selector = NSSelectorFromString(@"closeGuest:error:");
+    if (!multitask || ![multitask respondsToSelector:selector]) return NO;
+    NSDictionary *guest = @{@"path": entry.folder ?: @"",
+                            @"uuid": entry.container ?: @"",
+                            @"folder": entry.url.path ?: @""};
+    NSError *error = nil;
+    BOOL ok = NO;
+    @try { ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(multitask, selector, guest, &error); }
+    @catch (__unused NSException *e) { return NO; }
+    if (!ok) LGLog([NSString stringWithFormat:@"Close guest refused: %@", error.localizedDescription ?: @"?"]);
+    return ok;
+}
+
+// Red disc with a white cross, drawn rather than borrowed from SF Symbols: the symbol's
+// cross is a knockout, so it goes transparent once the ring is removed.
+static UIImage *LGCloseBadgeImage(CGFloat diameter) {
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(diameter, diameter) format:format];
+    return [[renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGContextRef ctx = context.CGContext;
+        [UIColor.systemRedColor setFill];
+        CGContextFillEllipseInRect(ctx, CGRectMake(0, 0, diameter, diameter));
+        CGFloat inset = diameter * 0.29, width = MAX(1.4, diameter * 0.13);
+        [UIColor.whiteColor setStroke];
+        CGContextSetLineWidth(ctx, width);
+        CGContextSetLineCap(ctx, kCGLineCapRound);
+        CGContextMoveToPoint(ctx, inset, inset);
+        CGContextAddLineToPoint(ctx, diameter - inset, diameter - inset);
+        CGContextMoveToPoint(ctx, diameter - inset, inset);
+        CGContextAddLineToPoint(ctx, inset, diameter - inset);
+        CGContextStrokePath(ctx);
+    }] imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+}
+
+// Emerald light with a breathing halo, same language as the floating-menu tweak.
+static UIView *LGRunningLight(CGFloat size) {
+    UIView *light = [[UIView alloc] initWithFrame:CGRectMake(0, 0, size, size)];
+    light.userInteractionEnabled = NO;
+    UIView *halo = [[UIView alloc] initWithFrame:CGRectInset(light.bounds, 1, 1)];
+    halo.layer.cornerRadius = CGRectGetWidth(halo.bounds) * 0.5;
+    halo.backgroundColor = [UIColor colorWithRed:0.16 green:0.79 blue:0.41 alpha:0.28];
+    [light addSubview:halo];
+    CGFloat coreSize = MAX(5, MIN(7, size * 0.5));
+    UIView *core = [[UIView alloc] initWithFrame:CGRectMake((size - coreSize) * 0.5, (size - coreSize) * 0.5, coreSize, coreSize)];
+    core.backgroundColor = [UIColor colorWithRed:0.19 green:0.88 blue:0.47 alpha:1];
+    core.layer.cornerRadius = coreSize * 0.5;
+    [light addSubview:core];
+    if (!UIAccessibilityIsReduceMotionEnabled()) {
+        CABasicAnimation *breath = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        breath.fromValue = @0.18;
+        breath.toValue = @0.78;
+        breath.duration = 1.85;
+        breath.autoreverses = YES;
+        breath.repeatCount = HUGE_VALF;
+        breath.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [halo.layer addAnimation:breath forKey:@"lg.running.breath"];
+    }
+    return light;
+}
+
 @interface LGCell : UICollectionViewCell
 @property(nonatomic, strong) UIImageView *icon;
 @property(nonatomic, strong) UILabel *label;
 @property(nonatomic, strong) UIImageView *lock;
 @property(nonatomic) BOOL showName;
 @property(nonatomic) BOOL locked;
+@property(nonatomic, strong) UIView *runningLight;
+@property(nonatomic, strong) UIButton *closeBadge;
+@property(nonatomic, copy) void (^onClose)(void);
+- (void)setRunning:(BOOL)running closable:(BOOL)closable;
 - (void)lgShowIcon:(UIImage *)image animated:(BOOL)animated;
 - (void)lgShowPlaceholder;
 @end
@@ -326,8 +411,16 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
         _lock.layer.cornerRadius = 9;
         _lock.clipsToBounds = YES;
         _lock.hidden = YES;
+        _runningLight = LGRunningLight(12);
+        _runningLight.hidden = YES;
+        _closeBadge = [UIButton buttonWithType:UIButtonTypeCustom];
+        [_closeBadge setImage:LGCloseBadgeImage(19) forState:UIControlStateNormal];
+        _closeBadge.hidden = YES;
+        [_closeBadge addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
         [self.contentView addSubview:_icon];
         [self.contentView addSubview:_lock];
+        [self.contentView addSubview:_runningLight];
+        [self.contentView addSubview:_closeBadge];
         [self.contentView addSubview:_label];
         self.backgroundColor = UIColor.clearColor;
         self.contentView.backgroundColor = UIColor.clearColor;
@@ -346,12 +439,34 @@ static void LGCollectSearchFields(UIView *view, UIView *skip, NSMutableArray<NSV
     _icon.frame = CGRectMake((self.bounds.size.width-size)/2, 6, size, size);
     _icon.layer.cornerRadius = size * 0.2237;
     _lock.frame = CGRectMake(CGRectGetMaxX(_icon.frame)-19, CGRectGetMaxY(_icon.frame)-19, 18, 18);
+    // Running light hugs the icon's bottom-right; the close X sits on the top-right so
+    // the two never overlap.
+    CGFloat lightSize = 12;
+    _runningLight.frame = CGRectMake(CGRectGetMaxX(_icon.frame)-lightSize-1,
+                                     CGRectGetMaxY(_icon.frame)-lightSize-1, lightSize, lightSize);
+    CGFloat badgeSize = 24;
+    _closeBadge.frame = CGRectMake(CGRectGetMaxX(_icon.frame)-badgeSize+5,
+                                   CGRectGetMinY(_icon.frame)-5, badgeSize, badgeSize);
     _label.frame = CGRectMake(1, size+11, self.bounds.size.width-2, 18);
     _label.hidden = !self.showName;
 }
 - (void)setHighlighted:(BOOL)highlighted {
     [super setHighlighted:highlighted];
     self.contentView.alpha = highlighted ? 0.55 : 1;
+}
+- (void)setRunning:(BOOL)running closable:(BOOL)closable {
+    self.runningLight.hidden = !running;
+    self.closeBadge.hidden = !(running && closable);
+    self.accessibilityValue = running ? @"正在运行" : nil;
+}
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.runningLight.hidden = YES;
+    self.closeBadge.hidden = YES;
+    self.onClose = nil;
+}
+- (void)closeTapped {
+    if (self.onClose) self.onClose();
 }
 // Icons arrive in two steps: a cheap bundle PNG on first paint, the themed icon a
 // moment later. Fading the second one in removes the hard cut that reads as a
@@ -425,6 +540,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // parking an always-visible field above the icons.
 @property(nonatomic) BOOL searchRevealed;
 @property(nonatomic) CFTimeInterval searchToggleTime;
+@property(nonatomic) CFTimeInterval lastRunningCheck;
 // Single floating entry point. Tap toggles grid / native list, long press opens the
 // settings sheet — one control, two gestures, both modes.
 @property(nonatomic, strong) UIButton *switchButton;
@@ -471,6 +587,8 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)lgLaunchEntry:(LGEntry *)entry;
 - (void)lgCollapseHostSearchIfNeeded;
 - (void)lgAdoptHostDoubleTaps:(UIView *)root;
+- (void)lgRefreshRunningBadges;
+- (void)lgCloseEntry:(LGEntry *)entry;
 - (void)lgLayoutContentWithWidth:(CGFloat)w height:(CGFloat)h top:(CGFloat)top safe:(UIEdgeInsets)safe;
 - (void)setSearchRevealed:(BOOL)revealed animated:(BOOL)animated;
 - (void)lgUpdateSwitchButton;
@@ -559,6 +677,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self lgUpdateSwitchButton];
     self.longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
     self.longPress.minimumPressDuration = 0.3;
+    self.longPress.delegate = self;   // keep long press off the close badge
     [self.collection addGestureRecognizer:self.longPress];
     self.footer = [UILabel new];
     self.footer.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
@@ -581,15 +700,38 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     [self refresh];
 }
 - (CGFloat)lgTopInset {
-    // The host bar is ~52pt taller while its large title is expanded. We draw the
-    // title ourselves, so keeping the whole bar height would leave that space empty
-    // above our own "App" and double the gap.
+    // Anchor to the *button row*, not to the whole bar: with a large title the bar is
+    // ~52pt taller, and with the search field expanded it grows again. Subtracting a
+    // fixed 52 only handled the first case, which is why switching over from a list
+    // that had its search open left a blank band.
     UINavigationController *nav = self.navigationController;
     if (nav && !nav.navigationBarHidden && nav.navigationBar) {
-        CGRect bar = [nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.view];
-        CGFloat height = CGRectGetHeight(bar);
-        CGFloat bottom = CGRectGetMaxY(bar);
-        if (height > 60) bottom -= 52;   // drop the large-title band
+        UIView *bar = nav.navigationBar;
+        CGRect barFrame = [bar convertRect:bar.bounds toView:self.view];
+        CGFloat barWidth = CGRectGetWidth(barFrame);
+        CGFloat rowBottom = CGFLOAT_MAX;
+        for (UIView *sub in bar.subviews) {
+            if (sub.hidden || sub.alpha < 0.01) continue;
+            CGRect frame = [sub convertRect:sub.bounds toView:self.view];
+            CGFloat height = CGRectGetHeight(frame);
+            // The content row is 44pt (50 on iPad); title and search bands are taller
+            // but sit below it, so the smallest qualifying bottom is the row we want.
+            if (height < 38 || height > 52) continue;
+            if (CGRectGetWidth(frame) < barWidth * 0.7) continue;
+            rowBottom = MIN(rowBottom, CGRectGetMaxY(frame));
+        }
+        if (rowBottom < CGFLOAT_MAX) {
+            static BOOL loggedBarGeometry = NO;
+            if (!loggedBarGeometry) {
+                loggedBarGeometry = YES;
+                LGLog([NSString stringWithFormat:@"Nav bar height=%.0f rowBottom=%.0f fullBottom=%.0f",
+                       CGRectGetHeight(barFrame), rowBottom, CGRectGetMaxY(barFrame)]);
+            }
+            return MAX(0, rowBottom);
+        }
+        // Layout unknown: fall back to the old estimate.
+        CGFloat bottom = CGRectGetMaxY(barFrame);
+        if (CGRectGetHeight(barFrame) > 60) bottom -= 52;
         return MAX(0, bottom);
     }
     return self.view.safeAreaInsets.top;
@@ -611,6 +753,11 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
             [self lgAdoptHostDoubleTaps:self.navigationController.view];
         }
         [self lgEnsureNavGuard];
+        CFTimeInterval runningNow = CFAbsoluteTimeGetCurrent();
+        if (runningNow - self.lastRunningCheck > 1.0) {
+            self.lastRunningCheck = runningNow;
+            [self lgRefreshRunningBadges];
+        }
     }
     CGFloat top = [self lgTopInset];
     UIEdgeInsets safe = self.view.safeAreaInsets;
@@ -809,6 +956,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         [cell lgShowIcon:LGFastIcon(entry) animated:NO];
         [self requestIconForEntry:entry key:key];
     }
+    __weak typeof(self) weakSelf = self;
+    cell.onClose = ^{ [weakSelf lgCloseEntry:entry]; };
+    [cell setRunning:LGRunningGuest(entry.container) closable:LGCanCloseGuests()];
     [cell setNeedsLayout];
     return cell;
 }
@@ -948,6 +1098,31 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
         }
     }];
 }
+// Poll the host for container ownership once a second; only visible cells are touched,
+// so the cost stays flat with the library size.
+- (void)lgRefreshRunningBadges {
+    BOOL closable = LGCanCloseGuests();
+    for (NSIndexPath *indexPath in self.collection.indexPathsForVisibleItems) {
+        if (indexPath.item >= (NSInteger)self.filtered.count) continue;
+        LGEntry *entry = self.filtered[indexPath.item];
+        LGCell *cell = (LGCell *)[self.collection cellForItemAtIndexPath:indexPath];
+        if (!cell) continue;
+        [cell setRunning:LGRunningGuest(entry.container) closable:closable];
+    }
+}
+
+- (void)lgCloseEntry:(LGEntry *)entry {
+    if (!LGCloseGuestEntry(entry)) {
+        [self showError:@"当前 LiveContainer 不支持从网格结束正在运行的应用。请在 LC 的多任务界面里关闭它。"];
+        return;
+    }
+    LGLog([NSString stringWithFormat:@"Closed running guest %@", entry.folder]);
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [weakSelf lgRefreshRunningBadges];
+    });
+}
+
 - (void)showError:(NSString *)message {
     if (self.presentedViewController) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"无法启动" message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -1429,6 +1604,13 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     LGLog(@"Swallowed a double tap in the host navigation area");
 }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (gestureRecognizer == self.longPress) {
+        // The close badge is a button inside the cell; long pressing it must not start a
+        // drag or open the cell menu.
+        UIView *view = touch.view;
+        if ([view isKindOfClass:UIButton.class] || [view.superview isKindOfClass:UIButton.class]) return NO;
+        return YES;
+    }
     if (gestureRecognizer != self.navTapGuard) return YES;
     return !LGIsControlLike(touch.view);
 }

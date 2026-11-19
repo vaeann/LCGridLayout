@@ -2254,6 +2254,9 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 @end
 
 static const void *LGOverlayKey = &LGOverlayKey;
+// 挂载复查判定为"不是 App 列表页"（标题对不上）的页面打上此标记，
+// 之后 LGIsAppListHost 一律拒绝，避免 detach → 重挂 → 再 detach 的死循环。
+static const void *LGRejectedKey = &LGRejectedKey;
 static NSHashTable<LGGridController *> *LGOverlays;
 
 // Only the tab bar controller knows a tab change is happening. Polling it means the
@@ -2399,6 +2402,27 @@ static LGGridController *LGMountOverlay(UIViewController *host) {
     LGLog([NSString stringWithFormat:@"Mounted on native app-list hosting controller after %.0f ms (safe.top=%.1f navBottom=%.1f)",
            (CFAbsoluteTimeGetCurrent() - LGStartTime) * 1000.0,
            host.view.safeAreaInsets.top, [grid lgTopInset]]);
+    // Mount recheck: a popup's SwiftUI hosting (crash-log sheet, error alert) has an
+    // empty navigation title at first layout, so it passes every check above and a
+    // grid would get mounted INSIDE the popup (dragging the sheet dragged the icons).
+    // Once its navigationTitle lands ("错误" etc.) the title no longer matches the
+    // Apps title: detach and mark the page as rejected so the tick cannot remount it.
+    // A real Apps page only ever has an empty title or the localized Apps title.
+    __weak UIViewController *weakHost = host;
+    __weak LGGridController *checkGrid = grid;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *h = weakHost;
+        LGGridController *g = checkGrid;
+        if (!h || !g || !h.isViewLoaded) return;
+        if (objc_getAssociatedObject(h, LGOverlayKey) != g) return;   // replaced meanwhile
+        UINavigationController *nav = h.navigationController;
+        NSString *title = h.navigationItem.title ?: nav.navigationBar.topItem.title;
+        if (title.length == 0 || [title isEqualToString:LGTitle()]) return;
+        LGLog([NSString stringWithFormat:@"Grid mount recheck failed (title=%@); detaching", title]);
+        objc_setAssociatedObject(h, LGRejectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(h, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LGDetachOverlay(g);
+    });
     return grid;
 }
 
@@ -2406,17 +2430,10 @@ static LGGridController *LGMountOverlay(UIViewController *host) {
 // hooks fire before the page has a window, which is exactly the point.
 static BOOL LGIsAppListHost(UIViewController *vc) {
     if (!vc || [vc isKindOfClass:LGGridController.class]) return NO;
+    // Pages rejected after a mount recheck (their navigation title turned out to be
+    // something other than the Apps title, i.e. a popup hosting) never get another grid.
+    if (objc_getAssociatedObject(vc, LGRejectedKey)) return NO;
     if (!strstr(class_getName(vc.class), "HostingController")) return NO;
-    // A controller inside a modal presentation is never the app list. The crash
-    // log sheet (and error alerts) also use a SwiftUI hosting controller with a
-    // one-level navigation controller, its title is still empty at first layout,
-    // and it has no tab-bar parent — so every later check passed and a second
-    // grid got mounted INSIDE the popup (dragging the sheet dragged the icons).
-    // presentationController is non-nil only on presented controllers; walking
-    // the parent chain catches the sheet's hosting through its nav controller.
-    for (UIViewController *p = vc; p; p = p.parentViewController) {
-        if (p.presentationController) return NO;
-    }
     UINavigationController *nav = vc.navigationController;
     if (!nav || nav.viewControllers.count != 1 || nav.topViewController != vc) return NO;
     // Never claim a background tab: its page is built ahead of time and would get
@@ -2501,23 +2518,9 @@ static void LGTick(void) {
             if (grid) [active addObject:grid];
         }
     }
-    // Snapshot enumeration: the loop below detaches stale overlays, and mutating
-    // a hash table while enumerating it throws.
+    // Snapshot enumeration: grid state changes during the loop (tab visibility,
+    // layout) must not mutate the hash table mid-enumeration.
     for (LGGridController *grid in LGOverlays.allObjects) {
-        // A grid mounted inside a presented hierarchy is a leftover from the old
-        // mount check (the crash-log sheet's hosting matched as an app list). Take
-        // it down; the real page keeps its own healthy instance.
-        UIViewController *parent = grid.parentViewController;
-        BOOL inModal = NO;
-        for (UIViewController *p = parent; p; p = p.parentViewController) {
-            if (p.presentationController) { inModal = YES; break; }
-        }
-        if (inModal) {
-            LGLog(@"Detached a grid mounted inside a modal presentation");
-            LGDetachOverlay(grid);
-            if (parent) objc_setAssociatedObject(parent, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            continue;
-        }
         // Independent of `active`: when SwiftUI swaps tab containers the host page can
         // drop out of the window entirely, and this is the only thing that brings the
         // overlay back when the Apps tab returns.

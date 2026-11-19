@@ -641,8 +641,7 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 - (void)prefetchIcons;
 - (BOOL)lgContainerExists:(LGEntry *)entry;
 - (void)lgLaunchEntry:(LGEntry *)entry;
-- (BOOL)lgShouldUseMultitask:(LGEntry *)entry;
-- (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry;
+- (BOOL)lgLaunchViaHostAPI:(LGEntry *)entry;
 - (BOOL)lgHandleRunningGuest:(LGEntry *)entry;
 - (void)lgUpdateTabVisibility;
 - (void)lgUpdateTabVisibilityForce:(BOOL)force;
@@ -1465,16 +1464,6 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
 // the global default) asks for it, a classic restart into the guest otherwise.
 // Mirrors LCAppModel.shouldLaunchInMultitaskMode, so the grid does not silently
 // disable a setting the user turned on.
-- (BOOL)lgShouldUseMultitask:(LGEntry *)entry {
-    if (entry.classicMode || entry.jitNeeded) return NO;
-    if (entry.multitaskSpecified == 1) return NO;
-    if (@available(iOS 16.0, *)) {
-        if (entry.multitaskSpecified == 2) return YES;
-        return [NSUserDefaults.standardUserDefaults boolForKey:@"LCLaunchInMultitaskMode"];
-    }
-    return NO;
-}
-
 // LCUtils reads `selected` / `selectedContainer` and removes them again, so they
 // must be written immediately before the call. NO means the entry point is missing
 // and the caller should fall back to the classic URL launch.
@@ -1562,62 +1551,64 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     return YES;
 }
 
-- (BOOL)lgLaunchMultitaskEntry:(LGEntry *)entry {
-    Class utils = NSClassFromString(@"LCUtils");
-    SEL selector = NSSelectorFromString(@"launchMultitaskGuestApp:completionHandler:");
-    if (!utils || ![utils respondsToSelector:selector]) return NO;
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    [defaults setObject:entry.folder forKey:@"selected"];
+// Last-resort fallback when the system refuses openURL. This is the host private
+// entry: LCSharedUtils parses the same launch URL, then uses LSApplicationWorkspace
+// to relaunch LiveContainer itself (and SIGKILLs the current process), so the guest
+// starts from a fresh launch. It does NOT create a data container and does not go
+// through runApp — never use it as the primary path, only when the native URL is
+// rejected.
+- (BOOL)lgLaunchViaHostAPI:(LGEntry *)entry {
+    Class utils = NSClassFromString(@"LCSharedUtils");
+    SEL direct = NSSelectorFromString(@"launchToGuestAppWithURL:");
+    if (!utils || ![utils respondsToSelector:direct]) return NO;
+    NSString *scheme = LGGet(NSClassFromString(@"LCUtils"), @"appUrlScheme") ?: @"livecontainer";
+    NSURLComponents *components = [NSURLComponents new];
+    components.scheme = scheme;
+    components.host = @"livecontainer-launch";
+    NSMutableArray<NSURLQueryItem *> *items = [NSMutableArray arrayWithObject:
+        [NSURLQueryItem queryItemWithName:@"bundle-name" value:entry.folder]];
     if (entry.container.length > 0) {
-        [defaults setObject:entry.container forKey:@"selectedContainer"];
-    } else {
-        [defaults removeObjectForKey:@"selectedContainer"];
+        [items addObject:[NSURLQueryItem queryItemWithName:@"container-folder-name" value:entry.container]];
     }
-    __weak typeof(self) weakSelf = self;
-    void (^completion)(NSNumber *, NSError *) = ^(NSNumber *pid, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) {
-                LGLog([NSString stringWithFormat:@"Multitask launch failed: %@", error.localizedDescription]);
-                [weakSelf showError:[NSString stringWithFormat:
-                    @"多任务启动失败：%@\n\n可以再点一次，或改用原生列表启动。", error.localizedDescription]];
-                return;
-            }
-            LGLog([NSString stringWithFormat:@"Multitask launch accepted (pid=%@)", pid]);
-            [weakSelf lgRefreshRunningBadges];
-        });
-    };
+    components.queryItems = items;
+    NSURL *url = components.URL;
+    if (!url) return NO;
+    BOOL accepted = NO;
     @try {
-        ((void (*)(id, SEL, NSString *, void (^)(NSNumber *, NSError *)))objc_msgSend)(utils, selector, entry.name ?: entry.folder, completion);
+        accepted = ((BOOL (*)(id, SEL, NSURL *))objc_msgSend)(utils, direct, url);
     } @catch (__unused NSException *e) {
-        return NO;
+        accepted = NO;
     }
-    return YES;
+    LGLog(accepted ? @"Host private launch API accepted (LiveContainer will relaunch)"
+                   : @"Host private launch API refused");
+    return accepted;
 }
 
 - (void)lgLaunchEntry:(LGEntry *)entry {
     // Never start a guest that is already running: the new scene makes
     // AppSceneViewController.setUpAppPresenter resolve an invalid pid and
     // +[FBSSceneClientIdentity identityForProcessIdentity:] traps (EXC_BREAKPOINT,
-    // 2026-11-13 crash reports). This blocks the multitask and the classic path
-    // alike, which is what stock LC does too (it reports the container as in use).
+    // 2026-11-13 crash reports). This blocks every launch path alike, which is what
+    // stock LC does too (it reports the container as in use).
     if ([self lgHandleRunningGuest:entry]) return;
-    if ([self lgShouldUseMultitask:entry]) {
-        // Double taps arrive twice; LCUtils consumes the global `selected` key, so a
-        // second call while the first is in flight would start the wrong app.
-        CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-        if (now - self.lastLaunchTime < 1.0) return;
-        self.lastLaunchTime = now;
-        [self.view endEditing:YES];
-        if ([self lgLaunchMultitaskEntry:entry]) {
-            LGLog([NSString stringWithFormat:@"Launching %@ via=multitask spec=%ld jit=%d",
-                   entry.folder, (long)entry.multitaskSpecified, entry.jitNeeded]);
-            return;
-        }
-        LGLog(@"Multitask entry point unavailable; falling back to classic launch");
-    }
+    // Double taps arrive twice; one in-flight launch per second is enough.
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - self.lastLaunchTime < 1.0) return;
+    self.lastLaunchTime = now;
+    [self.view endEditing:YES];
+
+    // Single source of truth: open the app with its own launch URL and let LC's
+    // native flow (onOpenURL -> dispatchURL -> LCAppModel.runApp) do everything.
+    // runApp creates the data container for first launches (UUID + plist) and then
+    // picks multitask vs classic from the app setting and LCLaunchInMultitaskMode,
+    // so the grid no longer re-implements any of that. Calling
+    // launchMultitaskGuestApp: directly skipped container creation: a brand-new app
+    // passed a nil dataUUID into AppSceneViewController and crashed with
+    // "attempt to insert nil object from objects[2]".
     NSString *scheme = LGGet(NSClassFromString(@"LCUtils"), @"appUrlScheme");
     if (![scheme isKindOfClass:NSString.class] || scheme.length == 0) {
-        LGLog(@"Launch refused: no native URL scheme");
+        LGLog(@"No native URL scheme; trying the host private API");
+        if ([self lgLaunchViaHostAPI:entry]) return;
         [self showError:@"LiveContainer 没有提供启动用的 URL scheme，无法从这个网格启动应用。请改用原生列表。"];
         return;
     }
@@ -1632,35 +1623,22 @@ typedef NS_ENUM(NSInteger, LGSheetAction) {
     components.queryItems = items;
     NSURL *url = components.URL;
     if (!url) return;
-    [self.view endEditing:YES];
-    LGLog([NSString stringWithFormat:@"Launching %@ (container=%@)", entry.folder, entry.container ?: @"(default)"]);
-
-    // Prefer the host's own entry point: same URL, but handed straight to
-    // LCSharedUtils instead of round-tripping through SpringBoard. This is what the
-    // floating-menu tweak does and it survives states where openURL is refused.
-    Class utils = NSClassFromString(@"LCSharedUtils");
-    SEL direct = NSSelectorFromString(@"launchToGuestAppWithURL:");
-    if (utils && [utils respondsToSelector:direct]) {
-        BOOL accepted = NO;
-        @try {
-            accepted = ((BOOL (*)(id, SEL, NSURL *))objc_msgSend)(utils, direct, url);
-        } @catch (__unused NSException *e) { accepted = NO; }
-        if (accepted) {
-            LGLog(@"Host launch API accepted the request");
-            return;
-        }
-        LGLog(@"Host launch API refused; falling back to openURL");
-    }
-
+    LGLog([NSString stringWithFormat:@"Launching %@ via native URL (container=%@)",
+           entry.folder, entry.container ?: @"(auto)"]);
+    __weak typeof(self) weakSelf = self;
     [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
-        LGLog(success ? @"Native launch URL accepted (guest launch outcome not asserted)" : @"Native launch URL rejected");
-        if (!success) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showError:@"系统拒绝了启动请求。请改用原生列表，并查看 LCGridLayout.log。"];
-            });
-        }
+        LGLog(success ? @"Native launch URL accepted" : @"Native launch URL rejected");
+        if (success) return;
+        // Rare: the system refused the URL. The private host entry still starts the
+        // guest (it relaunches LiveContainer through LSApplicationWorkspace), but it
+        // bypasses container creation, so it stays a fallback only.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if ([weakSelf lgLaunchViaHostAPI:entry]) return;
+            [weakSelf showError:@"系统拒绝了启动请求。请改用原生列表，并查看 LCGridLayout.log。"];
+        });
     }];
 }
+
 // Poll the host for container ownership once a second; only visible cells are touched,
 // so the cost stays flat with the library size.
 - (void)lgRefreshRunningBadges {
@@ -2429,6 +2407,16 @@ static LGGridController *LGMountOverlay(UIViewController *host) {
 static BOOL LGIsAppListHost(UIViewController *vc) {
     if (!vc || [vc isKindOfClass:LGGridController.class]) return NO;
     if (!strstr(class_getName(vc.class), "HostingController")) return NO;
+    // A controller inside a modal presentation is never the app list. The crash
+    // log sheet (and error alerts) also use a SwiftUI hosting controller with a
+    // one-level navigation controller, its title is still empty at first layout,
+    // and it has no tab-bar parent — so every later check passed and a second
+    // grid got mounted INSIDE the popup (dragging the sheet dragged the icons).
+    // presentationController is non-nil only on presented controllers; walking
+    // the parent chain catches the sheet's hosting through its nav controller.
+    for (UIViewController *p = vc; p; p = p.parentViewController) {
+        if (p.presentationController) return NO;
+    }
     UINavigationController *nav = vc.navigationController;
     if (!nav || nav.viewControllers.count != 1 || nav.topViewController != vc) return NO;
     // Never claim a background tab: its page is built ahead of time and would get
@@ -2513,7 +2501,23 @@ static void LGTick(void) {
             if (grid) [active addObject:grid];
         }
     }
-    for (LGGridController *grid in LGOverlays) {
+    // Snapshot enumeration: the loop below detaches stale overlays, and mutating
+    // a hash table while enumerating it throws.
+    for (LGGridController *grid in LGOverlays.allObjects) {
+        // A grid mounted inside a presented hierarchy is a leftover from the old
+        // mount check (the crash-log sheet's hosting matched as an app list). Take
+        // it down; the real page keeps its own healthy instance.
+        UIViewController *parent = grid.parentViewController;
+        BOOL inModal = NO;
+        for (UIViewController *p = parent; p; p = p.parentViewController) {
+            if (p.presentationController) { inModal = YES; break; }
+        }
+        if (inModal) {
+            LGLog(@"Detached a grid mounted inside a modal presentation");
+            LGDetachOverlay(grid);
+            if (parent) objc_setAssociatedObject(parent, LGOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            continue;
+        }
         // Independent of `active`: when SwiftUI swaps tab containers the host page can
         // drop out of the window entirely, and this is the only thing that brings the
         // overlay back when the Apps tab returns.
